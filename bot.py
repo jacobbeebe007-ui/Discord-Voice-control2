@@ -47,69 +47,15 @@ def is_admin():
     return app_commands.check(predicate)
 
 # ─────────────────────────────────────────────
-# LOBBY MAPPING VIEWS
+# HELPERS
 # ─────────────────────────────────────────────
 
-class LobbyMappingView(discord.ui.View):
-    def __init__(self, guild: discord.Guild):
-        super().__init__(timeout=120)
-        self.guild = guild
-        voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
-        self.add_item(ChannelMappingSelect(voice_channels, guild))
-
-
-class ChannelMappingSelect(discord.ui.Select):
-    def __init__(self, voice_channels, guild):
-        self.guild = guild
-        options = [
-            discord.SelectOption(label=c.name, value=str(c.id))
-            for c in voice_channels[:25]
-        ]
-        super().__init__(placeholder="Select a voice channel to configure...", options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        vc_id = self.values[0]
-        vc = self.guild.get_channel(int(vc_id))
-        view = LobbyPickerView(self.guild, vc)
-        await interaction.response.send_message(
-            f"Select the **lobby channel** that `{vc.name}` members go to on `/recall`:",
-            view=view, ephemeral=True
-        )
-
-
-class LobbyPickerView(discord.ui.View):
-    def __init__(self, guild, source_vc):
-        super().__init__(timeout=60)
-        voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
-        self.add_item(LobbyPickerSelect(voice_channels, guild, source_vc))
-
-
-class LobbyPickerSelect(discord.ui.Select):
-    def __init__(self, voice_channels, guild, source_vc):
-        self.guild = guild
-        self.source_vc = source_vc
-        options = [
-            discord.SelectOption(label=c.name, value=str(c.id))
-            for c in voice_channels[:25]
-        ]
-        super().__init__(placeholder="Select lobby/destination channel...", options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        lobby_id = self.values[0]
-        lobby_ch = self.guild.get_channel(int(lobby_id))
-        gid = str(self.guild.id)
-        if gid not in lobby_map:
-            lobby_map[gid] = {}
-        lobby_map[gid][str(self.source_vc.id)] = int(lobby_id)
-        save_lobby_map(lobby_map)
-        await interaction.response.send_message(
-            f"✅ `{self.source_vc.name}` → `{lobby_ch.name}` saved!", ephemeral=True
-        )
-
-
-# ─────────────────────────────────────────────
-# TEAM BUILDER
-# ─────────────────────────────────────────────
+def find_member_team(guild_id: int, member_id: int):
+    """Return the vc_id the member is currently assigned to, or None."""
+    for vc_id, members in team_storage.get(guild_id, {}).items():
+        if member_id in members:
+            return vc_id
+    return None
 
 def build_team_summary(guild: discord.Guild, guild_id: int) -> str:
     teams = team_storage.get(guild_id, {})
@@ -122,9 +68,110 @@ def build_team_summary(guild: discord.Guild, guild_id: int) -> str:
         for mid in member_ids:
             m = guild.get_member(mid)
             names.append(m.display_name if m else f"Unknown({mid})")
-        lines.append(f"**{vc.name if vc else vc_id}**: {', '.join(names) if names else 'empty'}")
+        lines.append(f"**{vc.name if vc else vc_id}** ({len(names)}): {', '.join(names) if names else 'empty'}")
     return "\n".join(lines)
 
+# ─────────────────────────────────────────────
+# LOBBY MAPPING VIEWS
+# ─────────────────────────────────────────────
+
+class LobbyMappingView(discord.ui.View):
+    """
+    Step 1: pick multiple source voice channels.
+    Step 2: pick the single lobby destination.
+    """
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.selected_source_ids: list[str] = []
+        voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
+        self.add_item(SourceChannelSelect(voice_channels, self))
+        self.add_item(LobbyDestSelect(voice_channels, self))
+
+    @discord.ui.button(label="💾 Save Mapping", style=discord.ButtonStyle.success, row=2)
+    async def save(self, interaction: discord.Interaction, button: discord.ui.Button):
+        source_ids = self.source_select.selected_ids
+        dest_id = self.dest_select.selected_id
+
+        if not source_ids:
+            await interaction.response.send_message("⚠️ Select at least one source channel.", ephemeral=True)
+            return
+        if not dest_id:
+            await interaction.response.send_message("⚠️ Select a lobby destination.", ephemeral=True)
+            return
+
+        gid = str(self.guild.id)
+        if gid not in lobby_map:
+            lobby_map[gid] = {}
+
+        dest_ch = self.guild.get_channel(int(dest_id))
+        saved = []
+        for src_id in source_ids:
+            lobby_map[gid][src_id] = int(dest_id)
+            src_ch = self.guild.get_channel(int(src_id))
+            saved.append(src_ch.name if src_ch else src_id)
+
+        save_lobby_map(lobby_map)
+        await interaction.response.send_message(
+            f"✅ Mapped **{', '.join(saved)}** → **{dest_ch.name if dest_ch else dest_id}**",
+            ephemeral=True
+        )
+
+
+class SourceChannelSelect(discord.ui.Select):
+    def __init__(self, voice_channels, parent_view: LobbyMappingView):
+        self.parent_view = parent_view
+        self.selected_ids: list[str] = []
+        options = [
+            discord.SelectOption(label=c.name, value=str(c.id))
+            for c in voice_channels[:25]
+        ]
+        super().__init__(
+            placeholder="1️⃣ Pick source channel(s) to recall FROM...",
+            options=options,
+            min_values=1,
+            max_values=min(len(voice_channels), 25),
+            row=0
+        )
+        parent_view.source_select = self
+
+    async def callback(self, interaction: discord.Interaction):
+        self.selected_ids = self.values
+        names = [interaction.guild.get_channel(int(v)).name for v in self.values if interaction.guild.get_channel(int(v))]
+        await interaction.response.send_message(
+            f"✅ Source(s) selected: **{', '.join(names)}** — now pick the lobby destination.",
+            ephemeral=True
+        )
+
+
+class LobbyDestSelect(discord.ui.Select):
+    def __init__(self, voice_channels, parent_view: LobbyMappingView):
+        self.parent_view = parent_view
+        self.selected_id: str = None
+        options = [
+            discord.SelectOption(label=c.name, value=str(c.id))
+            for c in voice_channels[:25]
+        ]
+        super().__init__(
+            placeholder="2️⃣ Pick lobby destination (recall TO)...",
+            options=options,
+            min_values=1,
+            max_values=1,
+            row=1
+        )
+        parent_view.dest_select = self
+
+    async def callback(self, interaction: discord.Interaction):
+        self.selected_id = self.values[0]
+        vc = interaction.guild.get_channel(int(self.selected_id))
+        await interaction.response.send_message(
+            f"✅ Destination set to **{vc.name}** — click 💾 Save Mapping to confirm.",
+            ephemeral=True
+        )
+
+# ─────────────────────────────────────────────
+# TEAM BUILDER
+# ─────────────────────────────────────────────
 
 class TeamBuilderView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
@@ -162,17 +209,30 @@ class TeamBuilderView(discord.ui.View):
             team_storage[gid][chosen_vc_id] = []
 
         added = []
+        moved_from = []
         for m in chosen_members:
-            if m and m.id not in team_storage[gid][chosen_vc_id]:
+            if not m:
+                continue
+            # Remove from previous team if already assigned
+            prev_vc_id = find_member_team(gid, m.id)
+            if prev_vc_id and prev_vc_id != chosen_vc_id:
+                team_storage[gid][prev_vc_id].remove(m.id)
+                prev_vc = self.guild.get_channel(int(prev_vc_id))
+                moved_from.append(f"{m.display_name} (was in {prev_vc.name if prev_vc else prev_vc_id})")
+            # Add to new team
+            if m.id not in team_storage[gid][chosen_vc_id]:
                 team_storage[gid][chosen_vc_id].append(m.id)
                 added.append(m.display_name)
 
         vc = self.guild.get_channel(int(chosen_vc_id))
         summary = build_team_summary(self.guild, gid)
-        await interaction.response.send_message(
-            f"✅ Added **{', '.join(added)}** → **{vc.name if vc else chosen_vc_id}**\n\n**Current Teams:**\n{summary}",
-            ephemeral=True
-        )
+
+        msg = f"✅ Assigned to **{vc.name if vc else chosen_vc_id}**: {', '.join(added)}"
+        if moved_from:
+            msg += f"\n🔄 Moved between teams: {', '.join(moved_from)}"
+        msg += f"\n\n**Current Teams:**\n{summary}"
+
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @discord.ui.button(label="🚀 Send Teams", style=discord.ButtonStyle.success, row=2)
     async def send_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -195,14 +255,12 @@ class TeamBuilderView(discord.ui.View):
                     moved.append(m.display_name)
                 elif m:
                     skipped.append(m.display_name)
-            line = f"**{vc.name}**: moved {', '.join(moved) if moved else 'nobody'}"
+            line = f"**{vc.name}** ({len(moved)} moved): {', '.join(moved) if moved else 'nobody'}"
             if skipped:
                 line += f" | not in voice: {', '.join(skipped)}"
             results.append(line)
 
-        await interaction.response.send_message(
-            "🚀 **Teams dispatched!**\n" + "\n".join(results)
-        )
+        await interaction.response.send_message("🚀 **Teams dispatched!**\n" + "\n".join(results))
 
     @discord.ui.button(label="📋 Show Teams", style=discord.ButtonStyle.secondary, row=2)
     async def show_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -247,12 +305,12 @@ class TeamMemberSelect(discord.ui.Select):
                 discord.SelectOption(label=m.display_name, value=str(m.id))
                 for m in members[:25]
             ]
-            max_vals = min(len(members), 10)
+            max_vals = min(len(members), 25)
         else:
             options = [discord.SelectOption(label="No members in voice", value="none")]
             max_vals = 1
         super().__init__(
-            placeholder="1️⃣ Pick member(s)...",
+            placeholder="1️⃣ Pick member(s) (up to 8 per team)...",
             options=options,
             min_values=1,
             max_values=max_vals,
@@ -263,9 +321,7 @@ class TeamMemberSelect(discord.ui.Select):
         if self.values == ["none"]:
             await interaction.response.send_message("No members in voice channels.", ephemeral=True)
             return
-        self.selected_members = [
-            interaction.guild.get_member(int(uid)) for uid in self.values
-        ]
+        self.selected_members = [interaction.guild.get_member(int(uid)) for uid in self.values]
         names = ", ".join(m.display_name for m in self.selected_members if m)
         await interaction.response.send_message(
             f"✅ Selected: **{names}** — now pick their channel and click ➕ Assign.",
@@ -282,7 +338,7 @@ class TeamChannelSelect(discord.ui.Select):
             for c in voice_channels[:25]
         ]
         super().__init__(
-            placeholder="2️⃣ Pick their channel...",
+            placeholder="2️⃣ Pick their team channel...",
             options=options,
             min_values=1,
             max_values=1,
@@ -296,7 +352,6 @@ class TeamChannelSelect(discord.ui.Select):
             f"✅ Channel set to **{vc.name}** — click ➕ Assign to confirm.",
             ephemeral=True
         )
-
 
 # ─────────────────────────────────────────────
 # SLASH COMMANDS
@@ -326,12 +381,14 @@ async def recall(interaction: discord.Interaction):
     await interaction.followup.send(f"✅ Recalled **{moved_total}** member(s) to their lobbies.")
 
 
-@bot.tree.command(name="set_lobby", description="[Admin] Configure which lobby each voice channel maps to.")
+@bot.tree.command(name="set_lobby", description="[Admin] Map voice channel(s) to a lobby destination.")
 @is_admin()
 async def set_lobby(interaction: discord.Interaction):
     view = LobbyMappingView(interaction.guild)
     await interaction.response.send_message(
-        "🔧 **Lobby Mapper** — Pick a voice channel then assign its recall destination:",
+        "🔧 **Lobby Mapper**\n"
+        "1️⃣ Pick one or more source channels → 2️⃣ Pick the lobby destination → 💾 Save\n"
+        "You can run this command multiple times to set up different lobby destinations.",
         view=view, ephemeral=True
     )
 
@@ -348,8 +405,9 @@ async def teams(interaction: discord.Interaction):
     view = TeamBuilderView(guild)
     await interaction.response.send_message(
         "👥 **Team Builder**\n"
-        "1️⃣ Pick members → 2️⃣ Pick channel → ➕ Assign → Repeat for more teams → 🚀 Send!\n"
-        "Use 🔁 Recall to pull everyone back to lobby when the round ends.",
+        "1️⃣ Pick members → 2️⃣ Pick channel → ➕ Assign → Repeat → 🚀 Send!\n"
+        "Players can only be on one team — reassigning moves them automatically.\n"
+        "Use 🔁 Recall to pull everyone back to lobby between rounds.",
         view=view,
         ephemeral=True
     )
