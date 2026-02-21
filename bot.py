@@ -10,7 +10,7 @@ load_dotenv()
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-TOKEN =MTQ3NDczMjc0Mzg5OTM0OTA3NA.GxMVxj.woHNeoac7DIaoAfXeOqlll-GO7cDDh6_qRNTu8
+TOKEN = MTQ3NDczMjc0Mzg5OTM0OTA3NA.GxMVxj.woHNeoac7DIaoAfXeOqlll-GO7cDDh6_qRNTu8
 if not TOKEN:
     raise ValueError("DISCORD_BOT_TOKEN is not set in your environment or .env file.")
 
