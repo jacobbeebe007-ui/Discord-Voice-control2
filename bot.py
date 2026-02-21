@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 import json
 import os
+import random
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -34,8 +35,6 @@ def save_lobby_map(data):
         json.dump(data, f, indent=2)
 
 lobby_map: dict = load_lobby_map()
-
-# In-memory team storage per guild: {guild_id: {vc_id: [member_ids]}}
 team_storage: dict = {}
 
 def get_guild_lobby_map(guild_id: int) -> dict:
@@ -47,11 +46,34 @@ def is_admin():
     return app_commands.check(predicate)
 
 # ─────────────────────────────────────────────
+# DISMISSIBLE VIEW
+# ─────────────────────────────────────────────
+
+class DismissView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+
+    @discord.ui.button(label="✕", style=discord.ButtonStyle.secondary)
+    async def dismiss(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.delete_original_response()
+
+    async def on_timeout(self):
+        pass
+
+
+async def send_minimal(interaction: discord.Interaction, content: str, ephemeral: bool = True):
+    await interaction.response.send_message(content, view=DismissView(), ephemeral=ephemeral)
+
+
+async def followup_minimal(interaction: discord.Interaction, content: str, ephemeral: bool = False):
+    await interaction.followup.send(content, view=DismissView(), ephemeral=ephemeral)
+
+# ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
 
 def find_member_team(guild_id: int, member_id: int):
-    """Return the vc_id the member is currently assigned to, or None."""
     for vc_id, members in team_storage.get(guild_id, {}).items():
         if member_id in members:
             return vc_id
@@ -76,17 +98,14 @@ def build_team_summary(guild: discord.Guild, guild_id: int) -> str:
 # ─────────────────────────────────────────────
 
 class LobbyMappingView(discord.ui.View):
-    """
-    Step 1: pick multiple source voice channels.
-    Step 2: pick the single lobby destination.
-    """
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=180)
         self.guild = guild
-        self.selected_source_ids: list[str] = []
         voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
-        self.add_item(SourceChannelSelect(voice_channels, self))
-        self.add_item(LobbyDestSelect(voice_channels, self))
+        self.source_select = SourceChannelSelect(voice_channels, self)
+        self.dest_select = LobbyDestSelect(voice_channels, self)
+        self.add_item(self.source_select)
+        self.add_item(self.dest_select)
 
     @discord.ui.button(label="💾 Save Mapping", style=discord.ButtonStyle.success, row=2)
     async def save(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -94,10 +113,10 @@ class LobbyMappingView(discord.ui.View):
         dest_id = self.dest_select.selected_id
 
         if not source_ids:
-            await interaction.response.send_message("⚠️ Select at least one source channel.", ephemeral=True)
+            await send_minimal(interaction, "⚠️ Select at least one source channel.")
             return
         if not dest_id:
-            await interaction.response.send_message("⚠️ Select a lobby destination.", ephemeral=True)
+            await send_minimal(interaction, "⚠️ Select a lobby destination.")
             return
 
         gid = str(self.guild.id)
@@ -112,15 +131,14 @@ class LobbyMappingView(discord.ui.View):
             saved.append(src_ch.name if src_ch else src_id)
 
         save_lobby_map(lobby_map)
-        await interaction.response.send_message(
-            f"✅ Mapped **{', '.join(saved)}** → **{dest_ch.name if dest_ch else dest_id}**",
-            ephemeral=True
+        await send_minimal(
+            interaction,
+            f"✅ **{', '.join(saved)}** → **{dest_ch.name if dest_ch else dest_id}**"
         )
 
 
 class SourceChannelSelect(discord.ui.Select):
-    def __init__(self, voice_channels, parent_view: LobbyMappingView):
-        self.parent_view = parent_view
+    def __init__(self, voice_channels, parent_view):
         self.selected_ids: list[str] = []
         options = [
             discord.SelectOption(label=c.name, value=str(c.id))
@@ -133,20 +151,15 @@ class SourceChannelSelect(discord.ui.Select):
             max_values=min(len(voice_channels), 25),
             row=0
         )
-        parent_view.source_select = self
 
     async def callback(self, interaction: discord.Interaction):
         self.selected_ids = self.values
         names = [interaction.guild.get_channel(int(v)).name for v in self.values if interaction.guild.get_channel(int(v))]
-        await interaction.response.send_message(
-            f"✅ Source(s) selected: **{', '.join(names)}** — now pick the lobby destination.",
-            ephemeral=True
-        )
+        await send_minimal(interaction, f"✅ Source(s): **{', '.join(names)}**")
 
 
 class LobbyDestSelect(discord.ui.Select):
-    def __init__(self, voice_channels, parent_view: LobbyMappingView):
-        self.parent_view = parent_view
+    def __init__(self, voice_channels, parent_view):
         self.selected_id: str = None
         options = [
             discord.SelectOption(label=c.name, value=str(c.id))
@@ -159,15 +172,115 @@ class LobbyDestSelect(discord.ui.Select):
             max_values=1,
             row=1
         )
-        parent_view.dest_select = self
 
     async def callback(self, interaction: discord.Interaction):
         self.selected_id = self.values[0]
         vc = interaction.guild.get_channel(int(self.selected_id))
-        await interaction.response.send_message(
-            f"✅ Destination set to **{vc.name}** — click 💾 Save Mapping to confirm.",
-            ephemeral=True
+        await send_minimal(interaction, f"✅ Destination: **{vc.name}**")
+
+# ─────────────────────────────────────────────
+# RANDOMISER VIEW
+# ─────────────────────────────────────────────
+
+class RandomiseView(discord.ui.View):
+    """
+    Step 1: pick which voice channels to use as teams.
+    Step 2: click Randomise — all current voice members are shuffled into them.
+    """
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=120)
+        self.guild = guild
+        voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
+        self.channel_select = RandomChannelSelect(voice_channels, self)
+        self.add_item(self.channel_select)
+
+    @discord.ui.button(label="🎲 Randomise!", style=discord.ButtonStyle.success, row=1)
+    async def randomise(self, interaction: discord.Interaction, button: discord.ui.Button):
+        selected_vc_ids = self.channel_select.selected_ids
+
+        if len(selected_vc_ids) < 2:
+            await send_minimal(interaction, "⚠️ Pick at least 2 voice channels to split players into.")
+            return
+
+        # Collect all members currently in any voice channel
+        all_voice_members = []
+        for vc in self.guild.voice_channels:
+            all_voice_members.extend(vc.members)
+        all_voice_members = list({m.id: m for m in all_voice_members}.values())
+
+        if not all_voice_members:
+            await send_minimal(interaction, "⚠️ No members are currently in any voice channel.")
+            return
+
+        # Shuffle and distribute evenly across selected channels
+        random.shuffle(all_voice_members)
+        num_teams = len(selected_vc_ids)
+        buckets: dict[str, list[discord.Member]] = {vc_id: [] for vc_id in selected_vc_ids}
+
+        for i, member in enumerate(all_voice_members):
+            vc_id = selected_vc_ids[i % num_teams]
+            buckets[vc_id].append(member)
+
+        # Save to team_storage and move members
+        gid = self.guild.id
+        team_storage[gid] = {}
+        results = []
+
+        await interaction.response.defer()
+
+        for vc_id, members in buckets.items():
+            vc = self.guild.get_channel(int(vc_id))
+            if not vc:
+                continue
+            team_storage[gid][vc_id] = []
+            moved, skipped = [], []
+            for m in members:
+                team_storage[gid][vc_id].append(m.id)
+                if m.voice:
+                    await m.move_to(vc)
+                    moved.append(m.display_name)
+                else:
+                    skipped.append(m.display_name)
+            line = f"**{vc.name}** ({len(moved)}): {', '.join(moved) if moved else 'nobody'}"
+            if skipped:
+                line += f" _(not in voice: {', '.join(skipped)})_"
+            results.append(line)
+
+        await followup_minimal(
+            interaction,
+            f"🎲 **Teams randomised!**\n" + "\n".join(results),
+            ephemeral=False
         )
+
+    @discord.ui.button(label="✕ Cancel", style=discord.ButtonStyle.secondary, row=1)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.delete_original_response()
+
+
+class RandomChannelSelect(discord.ui.Select):
+    def __init__(self, voice_channels, parent_view):
+        self.selected_ids: list[str] = []
+        options = [
+            discord.SelectOption(
+                label=c.name,
+                description=f"{len(c.members)} member(s) currently connected",
+                value=str(c.id)
+            )
+            for c in voice_channels[:25]
+        ]
+        super().__init__(
+            placeholder="Pick 2–25 voice channels to use as teams...",
+            options=options,
+            min_values=2,
+            max_values=min(len(voice_channels), 25),
+            row=0
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.selected_ids = self.values
+        names = [interaction.guild.get_channel(int(v)).name for v in self.values if interaction.guild.get_channel(int(v))]
+        await send_minimal(interaction, f"✅ Teams: **{', '.join(names)}** — click 🎲 Randomise!")
 
 # ─────────────────────────────────────────────
 # TEAM BUILDER
@@ -197,10 +310,10 @@ class TeamBuilderView(discord.ui.View):
         chosen_vc_id = self.channel_select.selected_vc_id
 
         if not chosen_members:
-            await interaction.response.send_message("⚠️ Select members first.", ephemeral=True)
+            await send_minimal(interaction, "⚠️ Select members first.")
             return
         if not chosen_vc_id:
-            await interaction.response.send_message("⚠️ Select a channel first.", ephemeral=True)
+            await send_minimal(interaction, "⚠️ Select a channel first.")
             return
 
         if gid not in team_storage:
@@ -208,18 +321,15 @@ class TeamBuilderView(discord.ui.View):
         if chosen_vc_id not in team_storage[gid]:
             team_storage[gid][chosen_vc_id] = []
 
-        added = []
-        moved_from = []
+        added, moved_from = [], []
         for m in chosen_members:
             if not m:
                 continue
-            # Remove from previous team if already assigned
             prev_vc_id = find_member_team(gid, m.id)
             if prev_vc_id and prev_vc_id != chosen_vc_id:
                 team_storage[gid][prev_vc_id].remove(m.id)
                 prev_vc = self.guild.get_channel(int(prev_vc_id))
                 moved_from.append(f"{m.display_name} (was in {prev_vc.name if prev_vc else prev_vc_id})")
-            # Add to new team
             if m.id not in team_storage[gid][chosen_vc_id]:
                 team_storage[gid][chosen_vc_id].append(m.id)
                 added.append(m.display_name)
@@ -227,19 +337,18 @@ class TeamBuilderView(discord.ui.View):
         vc = self.guild.get_channel(int(chosen_vc_id))
         summary = build_team_summary(self.guild, gid)
 
-        msg = f"✅ Assigned to **{vc.name if vc else chosen_vc_id}**: {', '.join(added)}"
+        msg = f"✅ **{vc.name if vc else chosen_vc_id}**: {', '.join(added)}"
         if moved_from:
-            msg += f"\n🔄 Moved between teams: {', '.join(moved_from)}"
-        msg += f"\n\n**Current Teams:**\n{summary}"
-
-        await interaction.response.send_message(msg, ephemeral=True)
+            msg += f"\n🔄 {', '.join(moved_from)}"
+        msg += f"\n\n{summary}"
+        await send_minimal(interaction, msg)
 
     @discord.ui.button(label="🚀 Send Teams", style=discord.ButtonStyle.success, row=2)
     async def send_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         gid = self.guild.id
         teams = team_storage.get(gid, {})
         if not teams:
-            await interaction.response.send_message("⚠️ No teams assigned yet.", ephemeral=True)
+            await send_minimal(interaction, "⚠️ No teams assigned yet.")
             return
 
         results = []
@@ -255,32 +364,41 @@ class TeamBuilderView(discord.ui.View):
                     moved.append(m.display_name)
                 elif m:
                     skipped.append(m.display_name)
-            line = f"**{vc.name}** ({len(moved)} moved): {', '.join(moved) if moved else 'nobody'}"
+            line = f"**{vc.name}**: {', '.join(moved) if moved else 'nobody moved'}"
             if skipped:
-                line += f" | not in voice: {', '.join(skipped)}"
+                line += f" _(not in voice: {', '.join(skipped)})_"
             results.append(line)
 
-        await interaction.response.send_message("🚀 **Teams dispatched!**\n" + "\n".join(results))
+        await send_minimal(interaction, "🚀 **Teams dispatched!**\n" + "\n".join(results), ephemeral=False)
 
     @discord.ui.button(label="📋 Show Teams", style=discord.ButtonStyle.secondary, row=2)
     async def show_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         summary = build_team_summary(self.guild, self.guild.id)
-        await interaction.response.send_message(f"**Current Teams:**\n{summary}", ephemeral=True)
+        await send_minimal(interaction, f"**Current Teams:**\n{summary}")
+
+    @discord.ui.button(label="🎲 Randomise Teams", style=discord.ButtonStyle.primary, row=3)
+    async def randomise_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = RandomiseView(self.guild)
+        await interaction.response.send_message(
+            "🎲 **Randomise Teams**\n"
+            "Pick the voice channels to use as teams — all players currently in voice will be shuffled evenly between them.",
+            view=view,
+            ephemeral=True
+        )
 
     @discord.ui.button(label="🗑️ Clear Teams", style=discord.ButtonStyle.danger, row=3)
     async def clear_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         team_storage.pop(self.guild.id, None)
-        await interaction.response.send_message("✅ All teams cleared.", ephemeral=True)
+        await send_minimal(interaction, "✅ Teams cleared.")
 
     @discord.ui.button(label="🔁 Recall All to Lobby", style=discord.ButtonStyle.secondary, row=3)
     async def recall_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = self.guild
         gmap = get_guild_lobby_map(guild.id)
         if not gmap:
-            await interaction.response.send_message(
-                "⚠️ No lobby mappings set. Use `/set_lobby` first.", ephemeral=True
-            )
+            await send_minimal(interaction, "⚠️ No lobby mappings set. Use `/set_lobby` first.")
             return
+        await interaction.response.defer()
         moved_total = 0
         for vc_id_str, lobby_id in gmap.items():
             vc = guild.get_channel(int(vc_id_str))
@@ -291,14 +409,11 @@ class TeamBuilderView(discord.ui.View):
                 if member.voice and member.voice.channel == vc:
                     await member.move_to(lobby)
                     moved_total += 1
-        await interaction.response.send_message(
-            f"✅ Recalled **{moved_total}** member(s) to their lobbies."
-        )
+        await followup_minimal(interaction, f"✅ Recalled **{moved_total}** member(s) to lobbies.", ephemeral=False)
 
 
 class TeamMemberSelect(discord.ui.Select):
     def __init__(self, members, parent_view):
-        self.parent_view = parent_view
         self.selected_members = []
         if members:
             options = [
@@ -310,7 +425,7 @@ class TeamMemberSelect(discord.ui.Select):
             options = [discord.SelectOption(label="No members in voice", value="none")]
             max_vals = 1
         super().__init__(
-            placeholder="1️⃣ Pick member(s) (up to 8 per team)...",
+            placeholder="1️⃣ Pick member(s)...",
             options=options,
             min_values=1,
             max_values=max_vals,
@@ -319,19 +434,15 @@ class TeamMemberSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         if self.values == ["none"]:
-            await interaction.response.send_message("No members in voice channels.", ephemeral=True)
+            await send_minimal(interaction, "⚠️ No members in voice channels.")
             return
         self.selected_members = [interaction.guild.get_member(int(uid)) for uid in self.values]
         names = ", ".join(m.display_name for m in self.selected_members if m)
-        await interaction.response.send_message(
-            f"✅ Selected: **{names}** — now pick their channel and click ➕ Assign.",
-            ephemeral=True
-        )
+        await send_minimal(interaction, f"✅ Selected: **{names}**")
 
 
 class TeamChannelSelect(discord.ui.Select):
     def __init__(self, voice_channels, parent_view):
-        self.parent_view = parent_view
         self.selected_vc_id = None
         options = [
             discord.SelectOption(label=c.name, value=str(c.id))
@@ -348,10 +459,7 @@ class TeamChannelSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         self.selected_vc_id = self.values[0]
         vc = interaction.guild.get_channel(int(self.selected_vc_id))
-        await interaction.response.send_message(
-            f"✅ Channel set to **{vc.name}** — click ➕ Assign to confirm.",
-            ephemeral=True
-        )
+        await send_minimal(interaction, f"✅ Channel: **{vc.name}**")
 
 # ─────────────────────────────────────────────
 # SLASH COMMANDS
@@ -363,9 +471,7 @@ async def recall(interaction: discord.Interaction):
     guild = interaction.guild
     gmap = get_guild_lobby_map(guild.id)
     if not gmap:
-        await interaction.response.send_message(
-            "⚠️ No lobby mappings configured. Use `/set_lobby` first.", ephemeral=True
-        )
+        await send_minimal(interaction, "⚠️ No lobby mappings configured. Use `/set_lobby` first.")
         return
     await interaction.response.defer()
     moved_total = 0
@@ -378,7 +484,7 @@ async def recall(interaction: discord.Interaction):
             if member.voice and member.voice.channel == vc:
                 await member.move_to(lobby)
                 moved_total += 1
-    await interaction.followup.send(f"✅ Recalled **{moved_total}** member(s) to their lobbies.")
+    await followup_minimal(interaction, f"✅ Recalled **{moved_total}** member(s) to their lobbies.", ephemeral=False)
 
 
 @bot.tree.command(name="set_lobby", description="[Admin] Map voice channel(s) to a lobby destination.")
@@ -387,8 +493,8 @@ async def set_lobby(interaction: discord.Interaction):
     view = LobbyMappingView(interaction.guild)
     await interaction.response.send_message(
         "🔧 **Lobby Mapper**\n"
-        "1️⃣ Pick one or more source channels → 2️⃣ Pick the lobby destination → 💾 Save\n"
-        "You can run this command multiple times to set up different lobby destinations.",
+        "1️⃣ Pick source channels → 2️⃣ Pick destination → 💾 Save\n"
+        "Run again to configure a different lobby.",
         view=view, ephemeral=True
     )
 
@@ -399,19 +505,18 @@ async def teams(interaction: discord.Interaction):
     guild = interaction.guild
     voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
     if not voice_channels:
-        await interaction.response.send_message("⚠️ No voice channels found.", ephemeral=True)
+        await send_minimal(interaction, "⚠️ No voice channels found.")
         return
 
     view = TeamBuilderView(guild)
     await interaction.response.send_message(
         "👥 **Team Builder**\n"
         "1️⃣ Pick members → 2️⃣ Pick channel → ➕ Assign → Repeat → 🚀 Send!\n"
-        "Players can only be on one team — reassigning moves them automatically.\n"
-        "Use 🔁 Recall to pull everyone back to lobby between rounds.",
+        "🎲 Randomise Teams shuffles everyone into selected channels automatically.\n"
+        "Use 🔁 to recall everyone back between rounds.",
         view=view,
         ephemeral=True
     )
-
 
 # ─────────────────────────────────────────────
 # ERROR HANDLERS
@@ -422,10 +527,9 @@ async def teams(interaction: discord.Interaction):
 @teams.error
 async def admin_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.CheckFailure):
-        await interaction.response.send_message("❌ Administrator permissions required.", ephemeral=True)
+        await send_minimal(interaction, "❌ Administrator permissions required.")
     else:
         raise error
-
 
 # ─────────────────────────────────────────────
 # STARTUP
