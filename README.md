@@ -1,67 +1,91 @@
 # 🎮 Discord Voice Manager Bot
 
-A bot for moving voice channel members, picking channels, and managing teams.
+A Discord bot for managing voice channels — recall members to lobbies, pick channels, and build teams.
 
 ---
 
-## Commands
+## 📁 Project Structure
 
-| Command | Who | What it does |
-|---------|-----|--------------|
-| `/set_lobby` | Admin | Interactively map each voice channel to a lobby channel |
-| `/recall` | Admin | Move ALL members in every voice channel to their mapped lobby |
+```
+discord-bot/          ← root directory (set this in Render)
+├── bot.py            ← main bot file
+├── requirements.txt  ← dependencies
+├── .env.example      ← token template (copy to .env locally)
+├── .gitignore        ← keeps .env out of GitHub
+└── README.md
+```
+
+---
+
+## 🤖 Commands
+
+| Command | Who | Description |
+|---------|-----|-------------|
+| `/set_lobby` | Admin | Map each voice channel to a lobby destination |
+| `/recall` | Admin | Move ALL voice members to their mapped lobby at once |
 | `/joinvc` | Anyone | Dropdown to pick a voice channel to be moved to |
-| `/teams` | Admin | Build teams from current voice members, then send them to channels with one button |
+| `/teams` | Admin | Build teams from current voice members, dispatch with one button |
 
 ---
 
-## Setup
+## 🚀 Deploying to Render via GitHub
 
-### 1. Install dependencies
+### Step 1 — Create your Discord Bot
+1. Go to https://discord.com/developers/applications → **New Application**
+2. Go to the **Bot** tab → **Add Bot** → copy the **Token**
+3. Enable these **Privileged Gateway Intents**:
+   - ✅ Server Members Intent
+   - ✅ Message Content Intent
+4. Go to **OAuth2 → URL Generator**:
+   - Scopes: `bot`, `applications.commands`
+   - Bot Permissions: `Move Members`, `Send Messages`, `Use Slash Commands`
+5. Open the generated URL and invite the bot to your server
+
+### Step 2 — Push to GitHub
 ```bash
+git init
+git add .
+git commit -m "Initial bot commit"
+git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
+git push -u origin main
+```
+> ⚠️ Make sure `.env` is in `.gitignore` — **never push your token to GitHub**
+
+### Step 3 — Deploy on Render
+1. Go to https://render.com → **New** → **Background Worker**
+2. Connect your GitHub repo
+3. Set these fields:
+   - **Root Directory**: `discord-bot` (or `.` if the files are at repo root)
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `python bot.py`
+4. Go to **Environment** tab and add:
+   - Key: `DISCORD_BOT_TOKEN`
+   - Value: *(paste your bot token)*
+5. Click **Create Background Worker** — Render will build and start your bot!
+
+---
+
+## 💻 Running Locally
+
+```bash
+# 1. Clone the repo
+git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+cd discord-bot
+
+# 2. Install dependencies
 pip install -r requirements.txt
-```
 
-### 2. Create a Discord Application
-1. Go to https://discord.com/developers/applications
-2. Create a new application → go to **Bot** tab → click **Add Bot**
-3. Copy the **Token**
-4. Under **Privileged Gateway Intents**, enable:
-   - **Server Members Intent**
-   - **Voice States** (on by default)
-   - **Message Content Intent**
-5. Under **OAuth2 → URL Generator**, select scopes: `bot`, `applications.commands`
-6. Bot permissions: `Move Members`, `Send Messages`, `Use Slash Commands`
-7. Use the generated URL to invite the bot to your server
+# 3. Set up your token
+cp .env.example .env
+# Edit .env and paste your token after DISCORD_BOT_TOKEN=
 
-### 3. Run the bot
-```bash
-export DISCORD_BOT_TOKEN="your-token-here"
-python bot.py
-```
-Or on Windows:
-```cmd
-set DISCORD_BOT_TOKEN=your-token-here
+# 4. Run
 python bot.py
 ```
 
 ---
 
-## How to Use
+## 📝 Notes
 
-### Setting up lobbies (`/set_lobby`)
-Run this once as admin. A dropdown appears — pick a voice channel, then pick which lobby it should drain into when `/recall` is used. Repeat for each channel. Settings are saved to `lobby_map.json`.
-
-### Recalling everyone (`/recall`)
-Moves ALL members from every mapped voice channel into their assigned lobby at once. Great for ending a game and pulling everyone back together.
-
-### Joining a voice channel (`/joinvc`)
-Any member can run this. A dropdown shows all voice channels with current member counts. Selecting one moves the member there (they must already be in a voice channel for the bot to move them).
-
-### Building teams (`/teams`)
-1. Run `/teams` — a panel appears showing all members currently in voice
-2. Select members from the first dropdown
-3. Select their destination channel from the second dropdown
-4. Repeat to build more teams
-5. Use **📋 Show Teams** to review
-6. Press **🚀 Send Teams to Channels** to move everyone at once
+- Lobby mappings are saved to `lobby_map.json` on the server disk. On Render's free tier, the disk resets on redeploy — mappings will need to be reconfigured. Upgrade to a paid plan or use a database (e.g. Render PostgreSQL) for persistence.
+- Slash commands may take up to 1 hour to appear globally after the first sync.

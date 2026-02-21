@@ -1,0 +1,16 @@
+# Secret — never commit this
+.env
+
+# Bot data
+lobby_map.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/

@@ -3,10 +3,17 @@ from discord.ext import commands
 from discord import app_commands
 import json
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("DISCORD_BOT_TOKEN is not set in your environment or .env file.")
+
 intents = discord.Intents.default()
 intents.members = True
 intents.voice_states = True
@@ -70,7 +77,6 @@ class ChannelMappingSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         vc_id = self.values[0]
         vc = self.guild.get_channel(int(vc_id))
-        # Now show lobby picker for this channel
         view = LobbyPickerView(self.guild, vc)
         await interaction.response.send_message(
             f"Select the **lobby channel** that `{vc.name}` members should be moved to:",
@@ -117,7 +123,7 @@ class LobbyPickerSelect(discord.ui.Select):
 
 
 class VoiceJoinView(discord.ui.View):
-    """Lets any user pick a voice channel to join (via a move prompt)."""
+    """Lets any user pick a voice channel to join."""
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=60)
         voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
@@ -145,8 +151,8 @@ class VoiceJoinSelect(discord.ui.Select):
             await interaction.response.send_message(f"✅ Moved you to **{vc.name}**!", ephemeral=True)
         else:
             await interaction.response.send_message(
-                f"➡️ Join **{vc.name}** — you must be in a voice channel first for me to move you.\n"
-                f"Channel ID: `{vc.id}` | Right-click the channel in Discord to join!",
+                f"⚠️ You must already be in a voice channel for me to move you.\n"
+                f"Join any voice channel first, then use `/joinvc` again.",
                 ephemeral=True
             )
 
@@ -154,12 +160,11 @@ class VoiceJoinSelect(discord.ui.Select):
 class TeamBuilderView(discord.ui.View):
     """Admin view: assign members to teams and send them to corresponding voice channels."""
 
-    def __init__(self, guild: discord.Guild, members: list[discord.Member], voice_channels: list[discord.VoiceChannel]):
+    def __init__(self, guild: discord.Guild, members: list, voice_channels: list):
         super().__init__(timeout=300)
         self.guild = guild
         self.voice_channels = voice_channels
-        self.teams: dict[str, list[discord.Member]] = {}  # vc_id → members
-        self.pending_members = list(members)
+        self.teams: dict = {}
         self.add_item(TeamMemberSelect(members, self))
         self.add_item(TeamChannelSelect(voice_channels, self))
 
@@ -180,7 +185,7 @@ class TeamBuilderView(discord.ui.View):
                     moved.append(m.display_name)
             results.append(f"**{vc.name}**: {', '.join(moved) if moved else 'nobody was in voice'}")
         summary = "\n".join(results)
-        await interaction.response.send_message(f"✅ Teams dispatched!\n{summary}", ephemeral=False)
+        await interaction.response.send_message(f"✅ Teams dispatched!\n{summary}")
 
     @discord.ui.button(label="🗑️ Clear Teams", style=discord.ButtonStyle.danger, row=2)
     async def clear_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -201,9 +206,9 @@ class TeamBuilderView(discord.ui.View):
 
 
 class TeamMemberSelect(discord.ui.Select):
-    def __init__(self, members, parent_view: TeamBuilderView):
+    def __init__(self, members, parent_view):
         self.parent_view = parent_view
-        self.selected_members: list[discord.Member] = []
+        self.selected_members = []
         options = [
             discord.SelectOption(label=m.display_name, value=str(m.id))
             for m in members[:25]
@@ -228,7 +233,7 @@ class TeamMemberSelect(discord.ui.Select):
 
 
 class TeamChannelSelect(discord.ui.Select):
-    def __init__(self, voice_channels, parent_view: TeamBuilderView):
+    def __init__(self, voice_channels, parent_view):
         self.parent_view = parent_view
         options = [
             discord.SelectOption(label=c.name, value=str(c.id))
@@ -245,7 +250,7 @@ class TeamChannelSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         vc_id = self.values[0]
         vc = interaction.guild.get_channel(int(vc_id))
-        member_select: TeamMemberSelect = self.parent_view.children[0]
+        member_select = self.parent_view.children[0]
         chosen = member_select.selected_members
         if not chosen:
             await interaction.response.send_message("⚠️ Select members first!", ephemeral=True)
@@ -324,11 +329,10 @@ async def joinvc(interaction: discord.Interaction):
 @is_admin()
 async def teams(interaction: discord.Interaction):
     guild = interaction.guild
-    # Gather members currently in any voice channel
     voice_members = []
     for vc in guild.voice_channels:
         voice_members.extend(vc.members)
-    voice_members = list({m.id: m for m in voice_members}.values())  # deduplicate
+    voice_members = list({m.id: m for m in voice_members}.values())
 
     if not voice_members:
         await interaction.response.send_message(
@@ -369,11 +373,5 @@ async def on_ready():
     print(f"   Slash commands synced.")
 
 
-# ─────────────────────────────────────────────
-# RUN
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
-    if not TOKEN:
-        raise ValueError("Set DISCORD_BOT_TOKEN environment variable.")
     bot.run(TOKEN)
