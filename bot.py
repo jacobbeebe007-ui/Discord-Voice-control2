@@ -96,10 +96,10 @@ def halo_rank(mmr: float) -> tuple:
     return "Recruit", "000_Recruit"
 
 def rank_display(mmr: float, guild: discord.Guild, provisional: bool = False) -> str:
-    """Full rank string: emoji + name + optional Yoink."""
+    """Full rank string: emoji + name + optional provisional marker."""
     rname, ename = halo_rank(mmr)
     remoji = get_emoji(guild, ename)
-    prov   = f" {get_emoji(guild, 'Yoink')}" if provisional else ""
+    prov   = " *" if provisional else ""
     return f"{remoji} {rname}{prov}"
 
 def leaderboard_pos_emoji(rank: int) -> str:
@@ -881,8 +881,7 @@ async def import_mmr(interaction: discord.Interaction, file: discord.Attachment)
         for cname, mmr, sessions in imported:
             rname, ename = halo_rank(mmr)
             remoji = get_emoji(interaction.guild, ename)
-            yoink  = get_emoji(interaction.guild, "Yoink")
-            prov   = f" {yoink}" if sessions < PROVISIONAL_SESSIONS else ""
+            prov   = " *" if sessions < PROVISIONAL_SESSIONS else ""
             lines.append(f"{remoji} **{cname}** — {mmr} MMR | *{rname}*{prov}")
 
         await followup_chunked(
@@ -910,8 +909,7 @@ async def leaderboard(interaction: discord.Interaction):
         mmr      = data.get("mmr", 0)
         sessions = data.get("sessions", 0)
         rname, ename = halo_rank(mmr)
-        yoink  = get_emoji(interaction.guild, "Yoink")
-        prov   = f" {yoink}" if sessions < PROVISIONAL_SESSIONS else ""
+        prov   = " *" if sessions < PROVISIONAL_SESSIONS else ""
         entry  = f"  `#{pos}` **{name}** — {mmr} MMR{prov}"
         if rname not in rank_groups:
             rank_groups[rname] = {"ename": ename, "entries": []}
@@ -942,11 +940,10 @@ async def mmr_lookup(interaction: discord.Interaction, player: str):
     sessions   = match.get("sessions", 0)
     rname, ename = halo_rank(mmr)
     remoji     = get_emoji(interaction.guild, ename)
-    yoink      = get_emoji(interaction.guild, "Yoink")
-    prov       = f" {yoink}" if sessions < PROVISIONAL_SESSIONS else ""
+    prov       = " *" if sessions < PROVISIONAL_SESSIONS else ""
 
     sessions_needed = PROVISIONAL_SESSIONS - sessions
-    prov_note = f"\n_{yoink} Provisional rank — needs {sessions_needed} more session(s) to be confirmed._" if sessions < PROVISIONAL_SESSIONS else ""
+    prov_note = f"\n_* Provisional rank — needs {sessions_needed} more session(s) to be confirmed._" if sessions < PROVISIONAL_SESSIONS else ""
     total_players = len(gmmr)
     lines = [
         f"**{name}** {remoji} *{rname}* — Rank **#{rank_pos} / {total_players}**{prov}{prov_note}",
