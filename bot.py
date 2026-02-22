@@ -185,6 +185,38 @@ async def send_minimal(interaction: discord.Interaction, content: str, ephemeral
 async def followup_minimal(interaction: discord.Interaction, content: str, ephemeral: bool = False):
     await interaction.followup.send(content, view=DismissView(), ephemeral=ephemeral)
 
+
+def chunk_message(lines: list, header: str = "", limit: int = 1900) -> list[str]:
+    """Split a list of lines into chunks under the Discord character limit."""
+    chunks = []
+    current = header
+    for line in lines:
+        if len(current) + len(line) + 1 > limit:
+            chunks.append(current)
+            current = line
+        else:
+            current = (current + "\n" + line).lstrip("\n")
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def send_chunked(interaction: discord.Interaction, lines: list, header: str = "", ephemeral: bool = False):
+    """Send a long list of lines split into multiple messages if needed."""
+    chunks = chunk_message(lines, header)
+    for i, chunk in enumerate(chunks):
+        if i == 0:
+            await interaction.response.send_message(chunk, view=DismissView(), ephemeral=ephemeral)
+        else:
+            await interaction.followup.send(chunk, view=DismissView(), ephemeral=ephemeral)
+
+
+async def followup_chunked(interaction: discord.Interaction, lines: list, header: str = "", ephemeral: bool = False):
+    """Followup version of send_chunked for deferred interactions."""
+    chunks = chunk_message(lines, header)
+    for chunk in chunks:
+        await interaction.followup.send(chunk, view=DismissView(), ephemeral=ephemeral)
+
 # ─────────────────────────────────────────────
 # GENERAL HELPERS
 # ─────────────────────────────────────────────
