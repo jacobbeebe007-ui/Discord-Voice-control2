@@ -61,28 +61,28 @@ def is_admin():
 # ─────────────────────────────────────────────
 
 HALO_RANKS = [
-    (95.5, "Inheritor",      ":021_Inheritor:"),
-    (91.0, "Reclaimer",      ":020_Reclaimer:"),
-    (86.5, "Forerunner",     ":019_Forerunner:"),
-    (82.0, "Nova",           ":018_Nova:"),
-    (77.5, "Eclipse",        ":017_Eclipse:"),
-    (73.0, "Noble",          ":016_Noble:"),
-    (68.5, "Mythic",         ":015_Mythic:"),
-    (64.0, "Legend",         ":014_Legend:"),
-    (59.5, "Hero",           ":013_Hero:"),
-    (55.0, "Field_Marshall", ":012_Field_Marshall:"),
-    (50.5, "General",        ":011_General:"),
-    (46.0, "Brigadier",      ":010_Brigadier:"),
-    (41.5, "Colonel",        ":009_Colonel:"),
-    (37.0, "Commander",      ":008_Commander:"),
-    (32.5, "Lt_Colonel",     ":007_Lt_Colonel:"),
-    (28.0, "Major",          ":006_Major:"),
-    (23.5, "Captain",        ":005_Captain:"),
-    (19.0, "Warrant_Officer",":004_Warrant_Officer:"),
-    (14.5, "Sergeant",       ":003_Sergeant:"),
-    (10.0, "Corporal",       ":002_Corporal:"),
-    (5.0,  "Private",        ":001_Private:"),
-    (0.0,  "Recruit",        ":000_Recruit:"),
+    (95.5, "Inheritor",      "<:021_Inheritor:1475019441019293760>"),
+    (91.0, "Reclaimer",      "<:020_Reclaimer:1475019406319943812>"),
+    (86.5, "Forerunner",     "<:019_Forerunner:1475019379727925368>"),
+    (82.0, "Nova",           "<:018_Nova:1475019345146151044>"),
+    (77.5, "Eclipse",        "<:017_Eclipse:1475019312677781555>"),
+    (73.0, "Noble",          "<:016_Noble:1475019246541996256>"),
+    (68.5, "Mythic",         "<:015_Mythic:1475019177239777290>"),
+    (64.0, "Legend",         "<:014_Legend:1475019147405557990>"),
+    (59.5, "Hero",           "<:013_Hero:1475019120377331742>"),
+    (55.0, "Field_Marshall", "<:012_Field_Marshall:1475019079898234942>"),
+    (50.5, "General",        "<:011_General:1475019040996069446>"),
+    (46.0, "Brigadier",      "<:010_Brigadier:1475018991364997203>"),
+    (41.5, "Colonel",        "<:009_Colonel:1475018952777269329>"),
+    (37.0, "Commander",      "<:008_Commander:1475018922058190932>"),
+    (32.5, "Lt_Colonel",     "<:007_Lt_Colonel:1475018893507690599>"),
+    (28.0, "Major",          "<:006_Major:1475018857448997065>"),
+    (23.5, "Captain",        "<:005_Captain:1475018822984667259>"),
+    (19.0, "Warrant_Officer","<:004_Warrant_Officer:1475018787286679694>"),
+    (14.5, "Sergeant",       "<:003_Sergeant:1475018752104857630>"),
+    (10.0, "Corporal",       "<:002_Corporal:1475016337775661220>"),
+    (5.0,  "Private",        "<:001_Private:1475016316610936964>"),
+    (0.0,  "Recruit",        "<:000_Recruit:1475016288211435662>"),
 ]
 
 def halo_rank(mmr: float) -> tuple:
@@ -160,7 +160,7 @@ def format_rank(player_data: dict) -> str:
     mmr       = player_data.get("mmr", 0)
     rname, remoji = halo_rank(mmr)
     if is_provisional(player_data):
-        return f"{remoji} *{rname}* :Yoink:"
+        return f"{remoji} *{rname}* <:Yoink:1298804059037368350>"
     return f"{remoji} *{rname}*"
 
 # ─────────────────────────────────────────────
@@ -211,7 +211,7 @@ def build_team_summary(guild: discord.Guild, guild_id: int) -> str:
             pdata = gmmr.get(cname) or gmmr.get(dname)
             if pdata:
                 rname, remoji = halo_rank(pdata["mmr"])
-                prov = " :Yoink:" if is_provisional(pdata) else ""
+                prov = " <:Yoink:1298804059037368350>" if is_provisional(pdata) else ""
                 names.append(f"{dname} {remoji}({pdata['mmr']}){prov}")
                 team_mmr_vals.append(pdata["mmr"])
             else:
@@ -424,7 +424,7 @@ class MatchmakeView(discord.ui.View):
                 team_storage[gid][vc_id].append(m.id)
                 if mmr is not None:
                     rname, remoji = halo_rank(mmr)
-                    prov = ":Yoink:" if is_provisional(pdata) else ""
+                    prov = "<:Yoink:1298804059037368350>" if is_provisional(pdata) else ""
                     label = f"{m.display_name}{remoji}{prov}"
                     mmr_vals.append(mmr)
                 else:
@@ -911,7 +911,7 @@ async def import_mmr(interaction: discord.Interaction, file: discord.Attachment)
         lines = []
         for cname, avg_mmr, session_count in imported_summary:
             rname, remoji = halo_rank(avg_mmr)
-            prov = " :Yoink:" if session_count < PROVISIONAL_SESSIONS else ""
+            prov = " <:Yoink:1298804059037368350>" if session_count < PROVISIONAL_SESSIONS else ""
             lines.append(f"{remoji} **{cname}** — {avg_mmr} MMR | *{rname}*{prov}")
 
         await followup_minimal(
@@ -936,7 +936,7 @@ async def leaderboard(interaction: discord.Interaction):
         sessions = data.get("sessions", 0)
         rname, remoji = halo_rank(mmr)
         pos  = leaderboard_pos_emoji(rank)
-        prov = " :Yoink:" if sessions < PROVISIONAL_SESSIONS else ""
+        prov = " <:Yoink:1298804059037368350>" if sessions < PROVISIONAL_SESSIONS else ""
         lines.append(f"{pos} {remoji} **{name}** — {mmr} MMR | *{rname}*{prov} | {sessions} session(s)")
     await send_minimal(interaction, "\n".join(lines), ephemeral=False)
 
@@ -953,7 +953,7 @@ async def mmr_lookup(interaction: discord.Interaction, player: str):
     rank_pos   = next((i+1 for i, p in enumerate(sorted_all) if p.get("mmr") == match.get("mmr")), "?")
     rname, remoji = halo_rank(match.get("mmr", 0))
     sessions   = match.get("sessions", 0)
-    prov       = " :Yoink:" if sessions < PROVISIONAL_SESSIONS else ""
+    prov       = " <:Yoink:1298804059037368350>" if sessions < PROVISIONAL_SESSIONS else ""
 
     lines = [
         f"**{name}** {remoji} *{rname}*{prov}",
