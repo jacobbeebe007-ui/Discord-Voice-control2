@@ -947,13 +947,14 @@ async def import_mmr(interaction: discord.Interaction, file: discord.Attachment)
             prov = " <:Yoink:1298804059037368350>" if session_count < PROVISIONAL_SESSIONS else ""
             lines.append(f"{remoji} **{cname}** — {avg_mmr} MMR | *{rname}*{prov}")
 
-        await followup_minimal(
+        await followup_chunked(
             interaction,
-            f"✅ Imported **{len(imported_summary)}** players from **{len(session_sheets)}** session(s)!\n\n" + "\n".join(lines),
+            lines,
+            header=f"✅ Imported **{len(imported_summary)}** players from **{len(session_sheets)}** session(s)!",
             ephemeral=True
         )
     except Exception as e:
-        await followup_minimal(interaction, f"❌ Error reading file: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
 
 @bot.tree.command(name="leaderboard", description="Show the Halo Reach MMR leaderboard.")
