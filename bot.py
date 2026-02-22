@@ -52,7 +52,7 @@ def is_admin():
     return app_commands.check(predicate)
 
 # ─────────────────────────────────────────────
-# EMOJI HELPERS
+# HALO REACH RANK SYSTEM
 # ─────────────────────────────────────────────
 
 HALO_RANKS = [
@@ -81,7 +81,6 @@ HALO_RANKS = [
 ]
 
 def get_emoji(guild: discord.Guild, name: str) -> str:
-    """Look up a custom emoji by name from the guild. Falls back to :name:."""
     if guild:
         e = discord.utils.get(guild.emojis, name=name)
         if e:
@@ -89,14 +88,12 @@ def get_emoji(guild: discord.Guild, name: str) -> str:
     return f":{name}:"
 
 def halo_rank(mmr: float) -> tuple:
-    """Returns (rank_name, emoji_name)."""
     for threshold, name, ename in HALO_RANKS:
         if mmr >= threshold:
             return name, ename
     return "Recruit", "000_Recruit"
 
 def rank_display(mmr: float, guild: discord.Guild, provisional: bool = False) -> str:
-    """Full rank string: emoji + name + optional provisional marker."""
     rname, ename = halo_rank(mmr)
     remoji = get_emoji(guild, ename)
     prov   = " *" if provisional else ""
@@ -147,15 +144,18 @@ def parse_session_sheet(ws) -> list:
             except: pass
             players.append({
                 "raw_name": raw, "name": canonical_name(raw),
-                "kd": kd, "assists": float(row[2] or 0),
-                "captures": float(row[6] or 0), "obj_time": float(row[7] or 0),
-                "points": float(row[9] or 0),
+                "kd":       kd,
+                "kills":    float(row[1] or 0),
+                "assists":  float(row[2] or 0),
+                "deaths":   float(row[3] or 0),
+                "captures": float(row[6] or 0),
+                "obj_time": float(row[7] or 0),
+                "points":   float(row[9] or 0),
             })
         except: continue
     return players
 
 def parse_leaderboard_sheet(ws) -> list:
-    """Parse the cumulative Leaderboard sheet for overall MMR."""
     rows = list(ws.iter_rows(values_only=True))
     if not rows: return []
     players = []
@@ -165,10 +165,12 @@ def parse_leaderboard_sheet(ws) -> list:
             if not name or name.lower() == "none": continue
             players.append({
                 "name":     name,
-                "kd":       float(row[6] or 0),
+                "kills":    float(row[3] or 0),
                 "assists":  float(row[4] or 0),
-                "captures": float(row[8] or 0),
+                "deaths":   float(row[5] or 0),
+                "kd":       float(row[6] or 0),
                 "obj_time": float(row[7] or 0),
+                "captures": float(row[8] or 0),
                 "points":   float(row[9] or 0),
                 "sessions": int(row[10] or 1),
             })
@@ -179,7 +181,7 @@ def get_guild_mmr(guild_id: int) -> dict:
     return mmr_data.get(str(guild_id), {})
 
 # ─────────────────────────────────────────────
-# DISMISSIBLE VIEW
+# MESSAGING HELPERS
 # ─────────────────────────────────────────────
 
 class DismissView(discord.ui.View):
@@ -214,6 +216,14 @@ def chunk_lines(lines: list, header: str = "", limit: int = 1800) -> list:
 async def followup_chunked(interaction: discord.Interaction, lines: list, header: str = "", ephemeral: bool = False):
     for chunk in chunk_lines(lines, header):
         await interaction.followup.send(chunk, view=DismissView(), ephemeral=ephemeral)
+
+async def send_single_or_chunked(interaction: discord.Interaction, lines: list, header: str = "", ephemeral: bool = False):
+    """Try to send as one message; chunk if over 2000 chars."""
+    message = (header + "\n" + "\n".join(lines)).strip()
+    if len(message) <= 2000:
+        await interaction.followup.send(message, view=DismissView(), ephemeral=ephemeral)
+    else:
+        await followup_chunked(interaction, lines, header=header, ephemeral=ephemeral)
 
 # ─────────────────────────────────────────────
 # GENERAL HELPERS
@@ -264,6 +274,14 @@ def save_team_to_history(guild_id: int, guild: discord.Guild, label: str = None)
     team_history[gid].insert(0, entry)
     team_history[gid] = team_history[gid][:10]
     save_json(TEAM_HISTORY_FILE, team_history)
+
+def format_player_stats(data: dict) -> str:
+    return (
+        f"Kills: {data.get('kills','?')} | Deaths: {data.get('deaths','?')} | "
+        f"K/D: {data.get('kd','?')} | Assists: {data.get('assists','?')} | "
+        f"Points: {data.get('points','?')} | Obj Time: {data.get('obj_time','?')}s | "
+        f"Captures: {data.get('captures','?')}"
+    )
 
 # ─────────────────────────────────────────────
 # LOBBY MAPPING VIEWS
@@ -437,10 +455,10 @@ class MatchmakeView(discord.ui.View):
                 team_storage[gid][vc_id].append(m.id)
                 if mmr is not None:
                     rd = rank_display(mmr, self.guild, is_provisional(pdata))
-                    label = f"{m.display_name}{rd}"
+                    label = f"{m.display_name} {rd}"
                     mmr_vals.append(mmr)
                 else:
-                    label = f"{m.display_name}❔"
+                    label = f"{m.display_name} ❔"
                 if m.voice: await m.move_to(vc); moved.append(label)
                 else: skipped.append(label)
             avg = f" | avg MMR: {round(sum(mmr_vals)/len(mmr_vals),1)}" if mmr_vals else ""
@@ -534,7 +552,7 @@ class TeamPresetsView(discord.ui.View):
         if not preset:
             await send_minimal(interaction, f"⚠️ Preset **{preset_name}** not found.")
             return
-        vcs_by_name = {vc.name: vc for vc in self.guild.voice_channels}
+        vcs_by_name     = {vc.name: vc for vc in self.guild.voice_channels}
         members_by_name = {m.display_name: m for m in self.guild.members}
         gid = self.guild.id
         team_storage[gid] = {}
@@ -779,6 +797,58 @@ async def teams(interaction: discord.Interaction):
         view=TeamBuilderView(interaction.guild), ephemeral=True)
 
 
+@bot.tree.command(name="sub", description="[Admin] Swap two players between teams.")
+@is_admin()
+async def sub(interaction: discord.Interaction, player_out: str, player_in: str):
+    gid   = interaction.guild.id
+    teams = team_storage.get(gid, {})
+    if not teams:
+        await send_minimal(interaction, "⚠️ No active teams. Set teams first with `/teams`.")
+        return
+    guild = interaction.guild
+
+    # Find player_out by display name
+    member_out = next((guild.get_member(mid) for mids in teams.values() for mid in mids
+                       if guild.get_member(mid) and guild.get_member(mid).display_name.lower() == player_out.lower()), None)
+    if not member_out:
+        await send_minimal(interaction, f"⚠️ **{player_out}** not found in any team.")
+        return
+
+    # Find player_in anywhere in the guild
+    member_in = next((m for m in guild.members if m.display_name.lower() == player_in.lower()), None)
+    if not member_in:
+        await send_minimal(interaction, f"⚠️ **{player_in}** not found in this server.")
+        return
+
+    # Find which team player_out is on
+    out_vc_id = find_member_team(gid, member_out.id)
+    if not out_vc_id:
+        await send_minimal(interaction, f"⚠️ **{player_out}** is not assigned to a team.")
+        return
+
+    # Remove player_out, add player_in
+    team_storage[gid][out_vc_id].remove(member_out.id)
+    # Remove player_in from any existing team first
+    in_vc_id = find_member_team(gid, member_in.id)
+    if in_vc_id:
+        team_storage[gid][in_vc_id].remove(member_in.id)
+    team_storage[gid][out_vc_id].append(member_in.id)
+
+    # Move in voice if possible
+    vc = guild.get_channel(int(out_vc_id))
+    voice_note = ""
+    if member_in.voice:
+        await member_in.move_to(vc)
+        voice_note = " and moved to voice channel"
+
+    await send_minimal(interaction,
+        f"🔄 **Sub complete!**\n"
+        f"**{member_out.display_name}** ← out\n"
+        f"**{member_in.display_name}** → in{voice_note}\n"
+        f"Team: **{vc.name if vc else out_vc_id}**\n\n"
+        f"{build_team_summary(guild, gid)}", ephemeral=False)
+
+
 @bot.tree.command(name="import_mmr", description="[Admin] Import player stats from your session Excel file.")
 @is_admin()
 async def import_mmr(interaction: discord.Interaction, file: discord.Attachment):
@@ -795,13 +865,11 @@ async def import_mmr(interaction: discord.Interaction, file: discord.Attachment)
         skip = ("collective", "summary")
         session_sheets = [s for s in wb.sheetnames if not any(k in s.lower() for k in skip) and s.lower() != "leaderboard"]
 
-        # Build session history per player
         per_player: dict = {}
         for sheet_name in session_sheets:
             players = parse_session_sheet(wb[sheet_name])
             if not players: continue
             players = calculate_mmr(players)
-            # Assign session rank (1 = best in that session)
             players_sorted = sorted(players, key=lambda x: x["mmr"], reverse=True)
             session_ranks  = {p["name"]: i+1 for i, p in enumerate(players_sorted)}
             session_size   = len(players)
@@ -812,12 +880,13 @@ async def import_mmr(interaction: discord.Interaction, file: discord.Attachment)
                     "session":      sheet_name,
                     "mmr":          p["mmr"],
                     "kd":           p["kd"],
+                    "kills":        p.get("kills", 0),
+                    "deaths":       p.get("deaths", 0),
                     "points":       p["points"],
                     "session_rank": session_ranks.get(p["name"], "?"),
                     "session_size": session_size,
                 })
 
-        # Compute overall MMR from Leaderboard sheet (cumulative stats)
         overall_mmr: dict = {}
         if "Leaderboard" in wb.sheetnames:
             lb_players = parse_leaderboard_sheet(wb["Leaderboard"])
@@ -830,47 +899,36 @@ async def import_mmr(interaction: discord.Interaction, file: discord.Attachment)
             await interaction.followup.send("⚠️ No valid data found.", ephemeral=True)
             return
 
-        # Merge everything into mmr_data
         all_names = set(per_player.keys()) | set(overall_mmr.keys())
-        imported = []
+        imported  = []
         for cname in all_names:
-            existing  = mmr_data[gid].get(cname, {})
+            existing = mmr_data[gid].get(cname, {})
             sessions_list = per_player.get(cname, [])
             lb = overall_mmr.get(cname) or next(
-                (v for k, v in overall_mmr.items() if k.lower() == cname.lower()), None
-            )
-            # Build merged history
+                (v for k, v in overall_mmr.items() if k.lower() == cname.lower()), None)
             existing_sessions = [h["session"] for h in existing.get("history", [])]
             new_history = existing.get("history", [])
             for s in sessions_list:
                 if s["session"] not in existing_sessions:
-                    new_history.append({
-                        "session":      s["session"],
-                        "mmr":          s["mmr"],
-                        "kd":           s["kd"],
-                        "points":       s["points"],
-                        "session_rank": s.get("session_rank", "?"),
-                        "session_size": s.get("session_size", "?"),
-                    })
-
-            # Overall MMR: from Leaderboard sheet if available, else average sessions
+                    new_history.append(s)
             if lb:
                 overall = lb["mmr"]
-                kd, points, obj_time, assists, captures = lb["kd"], lb["points"], lb["obj_time"], lb["assists"], lb["captures"]
-                session_count = lb["sessions"]
+                kd, kills, deaths = lb["kd"], lb.get("kills", 0), lb.get("deaths", 0)
+                points, obj_time  = lb["points"], lb["obj_time"]
+                assists, captures = lb["assists"], lb["captures"]
+                session_count     = lb["sessions"]
             elif sessions_list:
                 overall = round(sum(s["mmr"] for s in sessions_list) / len(sessions_list), 1)
-                last = sessions_list[-1]
-                kd, points = last["kd"], last["points"]
-                obj_time, assists, captures = 0, 0, 0
+                last    = sessions_list[-1]
+                kd, kills, deaths = last["kd"], last.get("kills", 0), last.get("deaths", 0)
+                points, obj_time, assists, captures = last["points"], 0, 0, 0
                 session_count = len(sessions_list)
             else:
                 continue
-
             mmr_data[gid][cname] = {
-                "mmr": overall, "kd": kd, "points": points,
-                "obj_time": obj_time, "assists": assists, "captures": captures,
-                "sessions": session_count, "history": new_history,
+                "mmr": overall, "kd": kd, "kills": kills, "deaths": deaths,
+                "points": points, "obj_time": obj_time, "assists": assists,
+                "captures": captures, "sessions": session_count, "history": new_history,
             }
             imported.append((cname, overall, session_count))
 
@@ -881,14 +939,12 @@ async def import_mmr(interaction: discord.Interaction, file: discord.Attachment)
         for cname, mmr, sessions in imported:
             rname, ename = halo_rank(mmr)
             remoji = get_emoji(interaction.guild, ename)
-            prov   = " *" if sessions < PROVISIONAL_SESSIONS else ""
-            lines.append(f"{remoji} **{cname}** — {mmr} MMR | *{rname}*{prov}")
+            prov   = "*" if sessions < PROVISIONAL_SESSIONS else ""
+            lines.append(f"{remoji} **{cname}**{prov} — {mmr} MMR")
 
-        await followup_chunked(
-            interaction, lines,
-            header=f"✅ Imported **{len(imported)}** players!\n",
-            ephemeral=True
-        )
+        header = f"✅ Imported **{len(imported)}** players!\n_* = Provisional (fewer than {PROVISIONAL_SESSIONS} sessions)_\n"
+        await send_single_or_chunked(interaction, lines, header=header, ephemeral=True)
+
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
@@ -900,29 +956,24 @@ async def leaderboard(interaction: discord.Interaction):
         await send_minimal(interaction, "⚠️ No MMR data yet. An admin needs to run `/import_mmr` first.")
         return
     await interaction.response.defer()
-
     sorted_players = sorted(gmmr.items(), key=lambda x: x[1].get("mmr", 0), reverse=True)
-
-    # Group players under rank banners
     rank_groups: OrderedDict = OrderedDict()
     for pos, (name, data) in enumerate(sorted_players, 1):
         mmr      = data.get("mmr", 0)
         sessions = data.get("sessions", 0)
         rname, ename = halo_rank(mmr)
-        prov   = " *" if sessions < PROVISIONAL_SESSIONS else ""
-        entry  = f"  `#{pos}` **{name}** — {mmr} MMR{prov}"
+        prov  = "*" if sessions < PROVISIONAL_SESSIONS else ""
+        entry = f"  `#{pos}` **{name}**{prov} — {mmr} MMR"
         if rname not in rank_groups:
             rank_groups[rname] = {"ename": ename, "entries": []}
         rank_groups[rname]["entries"].append(entry)
-
-    # Build message lines
     lines = []
     for rname, group in rank_groups.items():
         remoji = get_emoji(interaction.guild, group["ename"])
         lines.append(f"{remoji} **{rname}**")
         lines.extend(group["entries"])
-
-    await followup_chunked(interaction, lines, header="🏆 **Halo Night MMR Leaderboard**\n", ephemeral=False)
+    header  = f"🏆 **Halo Night MMR Leaderboard**\n_* = Provisional (fewer than {PROVISIONAL_SESSIONS} sessions)_\n"
+    await send_single_or_chunked(interaction, lines, header=header, ephemeral=False)
 
 
 @bot.tree.command(name="mmr", description="Look up a player's MMR, rank, and session history.")
@@ -934,22 +985,23 @@ async def mmr_lookup(interaction: discord.Interaction, player: str):
         await send_minimal(interaction, f"⚠️ No MMR data found for **{player}**.\nTip: use just the first name e.g. `Jacob`")
         return
     await interaction.response.defer()
-    sorted_all = sorted(gmmr.values(), key=lambda x: x.get("mmr", 0), reverse=True)
-    rank_pos   = next((i+1 for i, p in enumerate(sorted_all) if p.get("mmr") == match.get("mmr")), "?")
-    mmr        = match.get("mmr", 0)
-    sessions   = match.get("sessions", 0)
-    rname, ename = halo_rank(mmr)
-    remoji     = get_emoji(interaction.guild, ename)
-    prov       = " *" if sessions < PROVISIONAL_SESSIONS else ""
-
+    sorted_all      = sorted(gmmr.values(), key=lambda x: x.get("mmr", 0), reverse=True)
+    total_players   = len(gmmr)
+    rank_pos        = next((i+1 for i, p in enumerate(sorted_all) if p.get("mmr") == match.get("mmr")), "?")
+    mmr             = match.get("mmr", 0)
+    sessions        = match.get("sessions", 0)
+    rname, ename    = halo_rank(mmr)
+    remoji          = get_emoji(interaction.guild, ename)
+    prov            = " *" if sessions < PROVISIONAL_SESSIONS else ""
     sessions_needed = PROVISIONAL_SESSIONS - sessions
-    prov_note = f"\n_* Provisional rank — needs {sessions_needed} more session(s) to be confirmed._" if sessions < PROVISIONAL_SESSIONS else ""
-    total_players = len(gmmr)
+    prov_note       = f"\n_* Provisional — needs {sessions_needed} more session(s) to confirm rank._" if sessions < PROVISIONAL_SESSIONS else ""
+
     lines = [
-        f"**{name}** {remoji} *{rname}* — Rank **#{rank_pos} / {total_players}**{prov}{prov_note}",
+        f"**{name}** {remoji} *{rname}*{prov} — Rank **#{rank_pos} / {total_players}**{prov_note}",
         f"Overall MMR: **{mmr}** | Sessions: **{sessions}**",
-        f"K/D: {match.get('kd','?')} | Points: {match.get('points','?')} | "
-        f"Obj Time: {match.get('obj_time','?')}s | Assists: {match.get('assists','?')} | Captures: {match.get('captures','?')}",
+        f"Kills: {match.get('kills','?')} | Deaths: {match.get('deaths','?')} | K/D: {match.get('kd','?')} | "
+        f"Assists: {match.get('assists','?')} | Points: {match.get('points','?')} | "
+        f"Obj Time: {match.get('obj_time','?')}s | Captures: {match.get('captures','?')}",
     ]
     history = match.get("history", [])
     if history:
@@ -957,14 +1009,199 @@ async def mmr_lookup(interaction: discord.Interaction, player: str):
         prev_mmr = None
         for h in history:
             h_rname, h_ename = halo_rank(h["mmr"])
-            h_remoji = get_emoji(interaction.guild, h_ename)
-            arrow = "" if prev_mmr is None else (" ▲" if h["mmr"] > prev_mmr else " ▼" if h["mmr"] < prev_mmr else " ─")
-            s_rank = h.get("session_rank", "?")
-            s_size = h.get("session_size", "?")
+            h_remoji  = get_emoji(interaction.guild, h_ename)
+            s_rank    = h.get("session_rank", "?")
+            s_size    = h.get("session_size", "?")
+            arrow     = "" if prev_mmr is None else (" ▲" if h["mmr"] > prev_mmr else " ▼" if h["mmr"] < prev_mmr else " ─")
             lines.append(f"> {h_remoji} *{h_rname}* | **{h['session']}**: {h['mmr']} MMR — #{s_rank}/{s_size}{arrow}")
-            prev_mmr = h["mmr"]
+            prev_mmr  = h["mmr"]
+    await send_single_or_chunked(interaction, lines, ephemeral=False)
 
-    await followup_chunked(interaction, lines, ephemeral=False)
+
+@bot.tree.command(name="rank", description="Check your own current rank and MMR.")
+async def rank(interaction: discord.Interaction):
+    gmmr  = get_guild_mmr(interaction.guild_id)
+    dname = interaction.user.display_name
+    cname = canonical_name(dname)
+    match = gmmr.get(cname) or gmmr.get(dname) or next(
+        (v for k, v in gmmr.items() if k.lower() == cname.lower()), None)
+    if not match:
+        await send_minimal(interaction,
+            f"⚠️ No MMR data found for **{dname}**.\n"
+            f"Your Discord display name needs to match your name in the spreadsheet.\n"
+            f"Ask an admin to run `/import_mmr` if you haven't been imported yet.")
+        return
+    sorted_all    = sorted(gmmr.values(), key=lambda x: x.get("mmr", 0), reverse=True)
+    total_players = len(gmmr)
+    rank_pos      = next((i+1 for i, p in enumerate(sorted_all) if p.get("mmr") == match.get("mmr")), "?")
+    mmr           = match.get("mmr", 0)
+    sessions      = match.get("sessions", 0)
+    rname, ename  = halo_rank(mmr)
+    remoji        = get_emoji(interaction.guild, ename)
+    prov          = " *" if sessions < PROVISIONAL_SESSIONS else ""
+    prov_note     = f"\n_* {PROVISIONAL_SESSIONS - sessions} more session(s) until your rank is confirmed._" if sessions < PROVISIONAL_SESSIONS else ""
+
+    await send_minimal(interaction,
+        f"**{dname}** {remoji} *{rname}*{prov} — Rank **#{rank_pos} / {total_players}**{prov_note}\n"
+        f"MMR: **{mmr}** | Sessions: **{sessions}**\n"
+        f"Kills: {match.get('kills','?')} | Deaths: {match.get('deaths','?')} | K/D: {match.get('kd','?')} | "
+        f"Assists: {match.get('assists','?')} | Points: {match.get('points','?')} | "
+        f"Obj Time: {match.get('obj_time','?')}s | Captures: {match.get('captures','?')}",
+        ephemeral=True)
+
+
+@bot.tree.command(name="compare", description="Compare two players side by side.")
+async def compare(interaction: discord.Interaction, player1: str, player2: str):
+    gmmr = get_guild_mmr(interaction.guild_id)
+    d1   = next((v for k, v in gmmr.items() if k.lower() == player1.lower()), None)
+    d2   = next((v for k, v in gmmr.items() if k.lower() == player2.lower()), None)
+    n1   = next((k for k in gmmr if k.lower() == player1.lower()), player1)
+    n2   = next((k for k in gmmr if k.lower() == player2.lower()), player2)
+    if not d1:
+        await send_minimal(interaction, f"⚠️ No data found for **{player1}**."); return
+    if not d2:
+        await send_minimal(interaction, f"⚠️ No data found for **{player2}**."); return
+
+    await interaction.response.defer()
+    sorted_all = sorted(gmmr.values(), key=lambda x: x.get("mmr", 0), reverse=True)
+    total      = len(gmmr)
+    r1         = next((i+1 for i, p in enumerate(sorted_all) if p.get("mmr") == d1.get("mmr")), "?")
+    r2         = next((i+1 for i, p in enumerate(sorted_all) if p.get("mmr") == d2.get("mmr")), "?")
+    rname1, ename1 = halo_rank(d1.get("mmr", 0))
+    rname2, ename2 = halo_rank(d2.get("mmr", 0))
+    e1 = get_emoji(interaction.guild, ename1)
+    e2 = get_emoji(interaction.guild, ename2)
+
+    def vs(val1, val2, higher_is_better=True):
+        try:
+            v1, v2 = float(val1), float(val2)
+            if higher_is_better:
+                w = "⬆️" if v1 > v2 else ("⬇️" if v1 < v2 else "🟰")
+            else:
+                w = "⬆️" if v1 < v2 else ("⬇️" if v1 > v2 else "🟰")
+            return w
+        except: return "❔"
+
+    lines = [
+        f"**{n1}** {e1} *{rname1}* vs **{n2}** {e2} *{rname2}*\n",
+        f"{'Stat':<14} {'▸ ' + n1:<18} {'▸ ' + n2:<18}",
+        f"{'-'*52}",
+        f"{'Rank':<14} {'#' + str(r1) + '/' + str(total):<18} {'#' + str(r2) + '/' + str(total):<18}",
+        f"{'MMR':<14} {str(d1.get('mmr','?')):<18} {str(d2.get('mmr','?')):<18} {vs(d1.get('mmr',0), d2.get('mmr',0))}",
+        f"{'Kills':<14} {str(d1.get('kills','?')):<18} {str(d2.get('kills','?')):<18} {vs(d1.get('kills',0), d2.get('kills',0))}",
+        f"{'Deaths':<14} {str(d1.get('deaths','?')):<18} {str(d2.get('deaths','?')):<18} {vs(d1.get('deaths',0), d2.get('deaths',0), higher_is_better=False)}",
+        f"{'K/D':<14} {str(d1.get('kd','?')):<18} {str(d2.get('kd','?')):<18} {vs(d1.get('kd',0), d2.get('kd',0))}",
+        f"{'Assists':<14} {str(d1.get('assists','?')):<18} {str(d2.get('assists','?')):<18} {vs(d1.get('assists',0), d2.get('assists',0))}",
+        f"{'Points':<14} {str(d1.get('points','?')):<18} {str(d2.get('points','?')):<18} {vs(d1.get('points',0), d2.get('points',0))}",
+        f"{'Obj Time':<14} {str(d1.get('obj_time','?')) + 's':<18} {str(d2.get('obj_time','?')) + 's':<18} {vs(d1.get('obj_time',0), d2.get('obj_time',0))}",
+        f"{'Captures':<14} {str(d1.get('captures','?')):<18} {str(d2.get('captures','?')):<18} {vs(d1.get('captures',0), d2.get('captures',0))}",
+        f"{'Sessions':<14} {str(d1.get('sessions','?')):<18} {str(d2.get('sessions','?')):<18}",
+    ]
+    await send_single_or_chunked(interaction, lines, header="", ephemeral=False)
+
+
+@bot.tree.command(name="rivals", description="Head-to-head session history between two players.")
+async def rivals(interaction: discord.Interaction, player1: str, player2: str):
+    gmmr = get_guild_mmr(interaction.guild_id)
+    d1   = next((v for k, v in gmmr.items() if k.lower() == player1.lower()), None)
+    d2   = next((v for k, v in gmmr.items() if k.lower() == player2.lower()), None)
+    n1   = next((k for k in gmmr if k.lower() == player1.lower()), player1)
+    n2   = next((k for k in gmmr if k.lower() == player2.lower()), player2)
+    if not d1:
+        await send_minimal(interaction, f"⚠️ No data found for **{player1}**."); return
+    if not d2:
+        await send_minimal(interaction, f"⚠️ No data found for **{player2}**."); return
+
+    await interaction.response.defer()
+    h1 = {h["session"]: h for h in d1.get("history", [])}
+    h2 = {h["session"]: h for h in d2.get("history", [])}
+    shared = sorted(set(h1.keys()) & set(h2.keys()))
+
+    if not shared:
+        await followup_minimal(interaction, f"⚠️ **{n1}** and **{n2}** have no sessions in common.")
+        return
+
+    p1_wins, p2_wins, draws = 0, 0, 0
+    lines = [f"⚔️ **{n1}** vs **{n2}** — {len(shared)} shared session(s)\n"]
+    for session in shared:
+        s1 = h1[session]
+        s2 = h2[session]
+        r1, e1 = halo_rank(s1["mmr"])
+        r2, e2 = halo_rank(s2["mmr"])
+        em1 = get_emoji(interaction.guild, e1)
+        em2 = get_emoji(interaction.guild, e2)
+        if s1["mmr"] > s2["mmr"]:
+            winner = f"→ **{n1}** wins"
+            p1_wins += 1
+        elif s2["mmr"] > s1["mmr"]:
+            winner = f"→ **{n2}** wins"
+            p2_wins += 1
+        else:
+            winner = "→ Draw"
+            draws += 1
+        rank1 = f"#{s1.get('session_rank','?')}/{s1.get('session_size','?')}"
+        rank2 = f"#{s2.get('session_rank','?')}/{s2.get('session_size','?')}"
+        lines.append(
+            f"**{session}**\n"
+            f"> {em1} {n1}: {s1['mmr']} MMR ({rank1})\n"
+            f"> {em2} {n2}: {s2['mmr']} MMR ({rank2})\n"
+            f"> {winner}"
+        )
+
+    lines.append(f"\n🏆 **Head-to-head:** {n1} {p1_wins} — {p2_wins} {n2}" + (f" ({draws} draw)" if draws else ""))
+    await send_single_or_chunked(interaction, lines, ephemeral=False)
+
+
+@bot.tree.command(name="stats", description="Show top performers by stat category.")
+async def stats(interaction: discord.Interaction):
+    gmmr = get_guild_mmr(interaction.guild_id)
+    if not gmmr:
+        await send_minimal(interaction, "⚠️ No MMR data yet. An admin needs to run `/import_mmr` first.")
+        return
+    await interaction.response.defer()
+
+    categories = [
+        ("mmr",      "🏆 Top MMR",         True),
+        ("kd",       "🎯 Best K/D",         True),
+        ("kills",    "💀 Most Kills",       True),
+        ("deaths",   "☠️ Fewest Deaths",    False),
+        ("assists",  "🤝 Most Assists",     True),
+        ("obj_time", "⏱️ Most Obj Time",    True),
+        ("captures", "🚩 Most Captures",    True),
+        ("points",   "⭐ Most Points",      True),
+    ]
+
+    lines = ["📊 **Stat Leaders**\n"]
+    for key, label, higher_is_better in categories:
+        valid = [(name, data) for name, data in gmmr.items() if data.get(key) is not None]
+        if not valid: continue
+        best_name, best_data = sorted(valid, key=lambda x: x[1].get(key, 0), reverse=higher_is_better)[0]
+        val   = best_data.get(key, "?")
+        rname, ename = halo_rank(best_data.get("mmr", 0))
+        remoji = get_emoji(interaction.guild, ename)
+        suffix = "s" if key == "obj_time" else ""
+        lines.append(f"{label}: **{best_name}** {remoji} — {val}{suffix}")
+
+    await send_single_or_chunked(interaction, lines, ephemeral=False)
+
+
+@bot.tree.command(name="export", description="[Admin] Download the MMR data file.")
+@is_admin()
+async def export(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    gid  = str(interaction.guild_id)
+    gmmr = mmr_data.get(gid, {})
+    if not gmmr:
+        await interaction.followup.send("⚠️ No MMR data to export.", ephemeral=True)
+        return
+    data    = json.dumps({gid: gmmr}, indent=2)
+    buffer  = io.BytesIO(data.encode())
+    fname   = f"mmr_data_{datetime.datetime.utcnow().strftime('%Y%m%d_%H%M')}.json"
+    await interaction.followup.send(
+        "📦 Here is your current MMR data file:",
+        file=discord.File(buffer, filename=fname),
+        ephemeral=True
+    )
 
 
 @bot.tree.command(name="presets", description="[Admin] View and load saved team presets.")
@@ -993,7 +1230,9 @@ async def view_history(interaction: discord.Interaction):
 @recall.error
 @set_lobby.error
 @teams.error
+@sub.error
 @import_mmr.error
+@export.error
 @view_presets.error
 @view_history.error
 async def admin_error(interaction: discord.Interaction, error):
