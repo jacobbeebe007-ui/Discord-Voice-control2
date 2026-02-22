@@ -186,8 +186,9 @@ async def followup_minimal(interaction: discord.Interaction, content: str, ephem
     await interaction.followup.send(content, view=DismissView(), ephemeral=ephemeral)
 
 
-def chunk_message(lines: list, header: str = "", limit: int = 1900) -> list[str]:
-    """Split a list of lines into chunks under the Discord character limit."""
+def chunk_message(lines: list, header: str = "", limit: int = 1500) -> list[str]:
+    """Split a list of lines into chunks under the Discord character limit.
+    Uses 1500 as limit to safely account for long custom emoji ID strings."""
     chunks = []
     current = header
     for line in lines:
