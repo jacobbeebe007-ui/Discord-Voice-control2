@@ -1,8 +1,11 @@
 # Secret — never commit this
 .env
 
-# Bot data
+# Bot data (regenerated automatically)
 lobby_map.json
+mmr_data.json
+presets.json
+team_history.json
 
 # Python
 __pycache__/
@@ -11,6 +14,3 @@ __pycache__/
 .venv/
 venv/
 env/
-*.egg-info/
-dist/
-build/
