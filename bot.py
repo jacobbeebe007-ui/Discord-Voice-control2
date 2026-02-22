@@ -23,9 +23,9 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-LOBBY_MAP_FILE   = "lobby_map.json"
-MMR_FILE         = "mmr_data.json"
-PRESETS_FILE     = "presets.json"
+LOBBY_MAP_FILE    = "lobby_map.json"
+MMR_FILE          = "mmr_data.json"
+PRESETS_FILE      = "presets.json"
 TEAM_HISTORY_FILE = "team_history.json"
 
 def load_json(path):
@@ -54,30 +54,31 @@ def is_admin():
 
 # ─────────────────────────────────────────────
 # UNSC RANK SYSTEM
+# Emojis chosen to feel Halo/military themed
 # ─────────────────────────────────────────────
 
 UNSC_RANKS = [
-    (95, "Spartan",    "⭐"),
-    (88, "Inheritor",  "🔱"),
-    (80, "Reclaimer",  "💠"),
-    (72, "Forerunner", "🔷"),
-    (63, "Legendary",  "🟣"),
-    (54, "Mythic",     "🟤"),
-    (45, "Onyx",       "⬛"),
-    (36, "Diamond",    "💎"),
-    (27, "Platinum",   "🩶"),
-    (18, "Gold",       "🥇"),
-    (10, "Silver",     "🩵"),
-    (0,  "Bronze",     "🟫"),
+    (95, "Spartan",    "🔰"),   # Shield — Spartan supersoldier
+    (88, "Inheritor",  "👑"),   # Crown — highest earned honour
+    (80, "Reclaimer",  "🌟"),   # Star — humanity's destiny title
+    (72, "Forerunner", "💫"),   # Ancient power
+    (63, "Legendary",  "🎖️"),  # Military medal
+    (54, "Mythic",     "⚔️"),   # Combat honour
+    (45, "Onyx",       "🛡️"),   # Shield rank
+    (36, "Diamond",    "💠"),   # Diamond tier
+    (27, "Platinum",   "🔷"),   # Platinum tier
+    (18, "Gold",       "🟡"),   # Gold tier
+    (10, "Silver",     "⚪"),   # Silver tier
+    (0,  "Bronze",     "🟤"),   # Bronze tier
 ]
 
-def unsc_rank(mmr: float) -> tuple[str, str]:
+def unsc_rank(mmr: float) -> tuple:
     for threshold, name, emoji in UNSC_RANKS:
         if mmr >= threshold:
             return name, emoji
-    return "Bronze", "🟫"
+    return "Bronze", "🟤"
 
-def mmr_rank_emoji(rank: int) -> str:
+def leaderboard_pos_emoji(rank: int) -> str:
     if rank == 1: return "🥇"
     if rank == 2: return "🥈"
     if rank == 3: return "🥉"
@@ -95,26 +96,28 @@ def normalise(values: list) -> list:
         return [50.0] * len(values)
     return [(v - mn) / (mx - mn) * 100 for v in values]
 
-def calculate_mmr(players: list) -> list:
+def calculate_mmr_for_session(players: list) -> list:
+    """Normalise and compute MMR within a single session."""
     keys = list(WEIGHTS.keys())
     normed = {k: normalise([p[k] for p in players]) for k in keys}
     for i, p in enumerate(players):
         p["mmr"] = round(sum(normed[k][i] * WEIGHTS[k] for k in keys), 1)
     return players
 
-def get_guild_mmr(guild_id: int) -> dict:
-    return mmr_data.get(str(guild_id), {})
+def canonical_name(raw: str) -> str:
+    """Strip gamertag in brackets — 'Josh (Y4RC0S)' → 'Josh'."""
+    return raw.split("(")[0].strip()
 
 def parse_session_sheet(ws) -> list:
-    """Parse a session worksheet into a list of player stat dicts."""
+    """Parse a session worksheet into player stat dicts using canonical names."""
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
         return []
     players = []
     for row in rows[1:]:
         try:
-            name = str(row[0]).strip() if row[0] else None
-            if not name or name.lower() in ("none", ""):
+            raw_name = str(row[0]).strip() if row[0] else None
+            if not raw_name or raw_name.lower() in ("none", ""):
                 continue
             kd = 0.0
             try:
@@ -122,7 +125,8 @@ def parse_session_sheet(ws) -> list:
             except (TypeError, ValueError):
                 kd = 0.0
             players.append({
-                "name":     name,
+                "raw_name": raw_name,
+                "name":     canonical_name(raw_name),
                 "kd":       kd,
                 "assists":  float(row[2] or 0),
                 "captures": float(row[6] or 0),
@@ -132,6 +136,9 @@ def parse_session_sheet(ws) -> list:
         except Exception:
             continue
     return players
+
+def get_guild_mmr(guild_id: int) -> dict:
+    return mmr_data.get(str(guild_id), {})
 
 # ─────────────────────────────────────────────
 # DISMISSIBLE VIEW
@@ -177,12 +184,11 @@ def build_team_summary(guild: discord.Guild, guild_id: int) -> str:
         for mid in member_ids:
             m = guild.get_member(mid)
             dname = m.display_name if m else f"Unknown({mid})"
-            pdata = gmmr.get(dname) or next(
-                (v for v in gmmr.values() if v.get("discord_id") == mid), None
-            )
+            cname = canonical_name(dname)
+            pdata = gmmr.get(cname) or gmmr.get(dname)
             if pdata:
-                rank_name, rank_emoji = unsc_rank(pdata["mmr"])
-                names.append(f"{dname} {rank_emoji}({pdata['mmr']})")
+                rname, remoji = unsc_rank(pdata["mmr"])
+                names.append(f"{dname} {remoji}({pdata['mmr']})")
                 team_mmr_vals.append(pdata["mmr"])
             else:
                 names.append(dname)
@@ -191,7 +197,6 @@ def build_team_summary(guild: discord.Guild, guild_id: int) -> str:
     return "\n".join(lines)
 
 def save_team_to_history(guild_id: int, guild: discord.Guild, label: str = None):
-    """Save current team_storage snapshot to team history (max 10 entries)."""
     gid = str(guild_id)
     if gid not in team_history:
         team_history[gid] = []
@@ -202,10 +207,7 @@ def save_team_to_history(guild_id: int, guild: discord.Guild, label: str = None)
     for vc_id, member_ids in teams.items():
         vc = guild.get_channel(int(vc_id))
         vc_name = vc.name if vc else str(vc_id)
-        names = []
-        for mid in member_ids:
-            m = guild.get_member(mid)
-            names.append(m.display_name if m else str(mid))
+        names = [guild.get_member(mid).display_name if guild.get_member(mid) else str(mid) for mid in member_ids]
         snapshot[vc_name] = names
     import datetime
     entry = {
@@ -213,7 +215,7 @@ def save_team_to_history(guild_id: int, guild: discord.Guild, label: str = None)
         "teams": snapshot
     }
     team_history[gid].insert(0, entry)
-    team_history[gid] = team_history[gid][:10]  # keep last 10
+    team_history[gid] = team_history[gid][:10]
     save_json(TEAM_HISTORY_FILE, team_history)
 
 # ─────────────────────────────────────────────
@@ -224,9 +226,9 @@ class LobbyMappingView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=180)
         self.guild = guild
-        voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
-        self.source_select = SourceChannelSelect(voice_channels)
-        self.dest_select   = LobbyDestSelect(voice_channels)
+        vcs = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
+        self.source_select = SourceChannelSelect(vcs)
+        self.dest_select   = LobbyDestSelect(vcs)
         self.add_item(self.source_select)
         self.add_item(self.dest_select)
 
@@ -253,20 +255,20 @@ class LobbyMappingView(discord.ui.View):
         await send_minimal(interaction, f"✅ **{', '.join(saved)}** → **{dest_ch.name if dest_ch else dest_id}**")
 
 class SourceChannelSelect(discord.ui.Select):
-    def __init__(self, voice_channels):
+    def __init__(self, vcs):
         self.selected_ids: list = []
-        options = [discord.SelectOption(label=c.name, value=str(c.id)) for c in voice_channels[:25]]
+        options = [discord.SelectOption(label=c.name, value=str(c.id)) for c in vcs[:25]]
         super().__init__(placeholder="1️⃣ Pick source channel(s) to recall FROM...", options=options,
-                         min_values=1, max_values=min(len(voice_channels), 25), row=0)
+                         min_values=1, max_values=min(len(vcs), 25), row=0)
     async def callback(self, interaction: discord.Interaction):
         self.selected_ids = self.values
         names = [interaction.guild.get_channel(int(v)).name for v in self.values if interaction.guild.get_channel(int(v))]
         await send_minimal(interaction, f"✅ Source(s): **{', '.join(names)}**")
 
 class LobbyDestSelect(discord.ui.Select):
-    def __init__(self, voice_channels):
+    def __init__(self, vcs):
         self.selected_id = None
-        options = [discord.SelectOption(label=c.name, value=str(c.id)) for c in voice_channels[:25]]
+        options = [discord.SelectOption(label=c.name, value=str(c.id)) for c in vcs[:25]]
         super().__init__(placeholder="2️⃣ Pick lobby destination (recall TO)...", options=options,
                          min_values=1, max_values=1, row=1)
     async def callback(self, interaction: discord.Interaction):
@@ -282,8 +284,8 @@ class RandomiseView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=120)
         self.guild = guild
-        voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
-        self.channel_select = RandomChannelSelect(voice_channels)
+        vcs = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
+        self.channel_select = RandomChannelSelect(vcs)
         self.add_item(self.channel_select)
 
     @discord.ui.button(label="🎲 Randomise!", style=discord.ButtonStyle.success, row=1)
@@ -328,14 +330,11 @@ class RandomiseView(discord.ui.View):
         await interaction.delete_original_response()
 
 class RandomChannelSelect(discord.ui.Select):
-    def __init__(self, voice_channels):
+    def __init__(self, vcs):
         self.selected_ids: list = []
-        options = [
-            discord.SelectOption(label=c.name, description=f"{len(c.members)} connected", value=str(c.id))
-            for c in voice_channels[:25]
-        ]
+        options = [discord.SelectOption(label=c.name, description=f"{len(c.members)} connected", value=str(c.id)) for c in vcs[:25]]
         super().__init__(placeholder="Pick 2–25 voice channels to use as teams...", options=options,
-                         min_values=2, max_values=min(len(voice_channels), 25), row=0)
+                         min_values=2, max_values=min(len(vcs), 25), row=0)
     async def callback(self, interaction: discord.Interaction):
         self.selected_ids = self.values
         names = [interaction.guild.get_channel(int(v)).name for v in self.values if interaction.guild.get_channel(int(v))]
@@ -349,8 +348,8 @@ class MatchmakeView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=120)
         self.guild = guild
-        voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
-        self.channel_select = MatchmakeChannelSelect(voice_channels)
+        vcs = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
+        self.channel_select = MatchmakeChannelSelect(vcs)
         self.add_item(self.channel_select)
 
     @discord.ui.button(label="⚖️ Generate Balanced Teams", style=discord.ButtonStyle.success, row=1)
@@ -367,9 +366,8 @@ class MatchmakeView(discord.ui.View):
         num_teams = len(selected_vc_ids)
         rated, unrated = [], []
         for m in all_voice_members:
-            pdata = gmmr.get(m.display_name) or next(
-                (v for v in gmmr.values() if v.get("discord_id") == m.id), None
-            )
+            cname = canonical_name(m.display_name)
+            pdata = gmmr.get(cname) or gmmr.get(m.display_name)
             if pdata:
                 rated.append((m, pdata["mmr"]))
             else:
@@ -400,15 +398,17 @@ class MatchmakeView(discord.ui.View):
             moved, skipped, mmr_vals = [], [], []
             for m, mmr in members:
                 team_storage[gid][vc_id].append(m.id)
-                rank_name, rank_emoji = unsc_rank(mmr) if mmr is not None else ("?", "❔")
-                label = f"{m.display_name}{rank_emoji}" if mmr is not None else f"{m.display_name}❔"
+                if mmr is not None:
+                    rname, remoji = unsc_rank(mmr)
+                    label = f"{m.display_name}{remoji}"
+                    mmr_vals.append(mmr)
+                else:
+                    label = f"{m.display_name}❔"
                 if m.voice:
                     await m.move_to(vc)
                     moved.append(label)
                 else:
                     skipped.append(label)
-                if mmr is not None:
-                    mmr_vals.append(mmr)
             avg = f" | avg MMR: {round(sum(mmr_vals)/len(mmr_vals),1)}" if mmr_vals else ""
             line = f"**{vc.name}**{avg}: {', '.join(moved) if moved else 'nobody'}"
             if skipped: line += f" _(not in voice: {', '.join(skipped)})_"
@@ -422,34 +422,29 @@ class MatchmakeView(discord.ui.View):
         await interaction.delete_original_response()
 
 class MatchmakeChannelSelect(discord.ui.Select):
-    def __init__(self, voice_channels):
+    def __init__(self, vcs):
         self.selected_ids: list = []
-        options = [
-            discord.SelectOption(label=c.name, description=f"{len(c.members)} connected", value=str(c.id))
-            for c in voice_channels[:25]
-        ]
+        options = [discord.SelectOption(label=c.name, description=f"{len(c.members)} connected", value=str(c.id)) for c in vcs[:25]]
         super().__init__(placeholder="Pick 2–25 voice channels to use as teams...", options=options,
-                         min_values=2, max_values=min(len(voice_channels), 25), row=0)
+                         min_values=2, max_values=min(len(vcs), 25), row=0)
     async def callback(self, interaction: discord.Interaction):
         self.selected_ids = self.values
         names = [interaction.guild.get_channel(int(v)).name for v in self.values if interaction.guild.get_channel(int(v))]
         await send_minimal(interaction, f"✅ Channels: **{', '.join(names)}** — click ⚖️ to generate!")
 
 # ─────────────────────────────────────────────
-# PRESET SAVE VIEW
+# PRESET VIEWS
 # ─────────────────────────────────────────────
 
 class SavePresetModal(discord.ui.Modal, title="Save Team Preset"):
     preset_name = discord.ui.TextInput(label="Preset Name", placeholder="e.g. Monday Night 6v6", max_length=50)
     preset_note = discord.ui.TextInput(label="Notes (optional)", placeholder="e.g. Competitive lineup, no subs",
                                        required=False, max_length=150, style=discord.TextStyle.paragraph)
-
     def __init__(self, guild: discord.Guild):
         super().__init__()
         self.guild = guild
-
     async def on_submit(self, interaction: discord.Interaction):
-        gid = str(self.guild.id)
+        gid   = str(self.guild.id)
         teams = team_storage.get(self.guild.id, {})
         if not teams:
             await send_minimal(interaction, "⚠️ No active teams to save.")
@@ -460,22 +455,12 @@ class SavePresetModal(discord.ui.Modal, title="Save Team Preset"):
         for vc_id, member_ids in teams.items():
             vc = self.guild.get_channel(int(vc_id))
             vc_name = vc.name if vc else str(vc_id)
-            names = []
-            for mid in member_ids:
-                m = self.guild.get_member(mid)
-                names.append(m.display_name if m else str(mid))
+            names = [self.guild.get_member(mid).display_name if self.guild.get_member(mid) else str(mid) for mid in member_ids]
             snapshot[vc_name] = names
         name = str(self.preset_name)
-        presets[gid][name] = {
-            "note":  str(self.preset_note) if self.preset_note.value else "",
-            "teams": snapshot
-        }
+        presets[gid][name] = {"note": str(self.preset_note) if self.preset_note.value else "", "teams": snapshot}
         save_json(PRESETS_FILE, presets)
         await send_minimal(interaction, f"✅ Preset **{name}** saved!")
-
-# ─────────────────────────────────────────────
-# LOAD PRESET VIEW
-# ─────────────────────────────────────────────
 
 class LoadPresetView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
@@ -484,25 +469,19 @@ class LoadPresetView(discord.ui.View):
         gid = str(guild.id)
         guild_presets = presets.get(gid, {})
         if guild_presets:
-            self.add_item(PresetSelect(guild_presets, guild))
+            self.add_item(PresetSelect(guild_presets))
 
 class PresetSelect(discord.ui.Select):
-    def __init__(self, guild_presets: dict, guild: discord.Guild):
-        self.guild = guild
+    def __init__(self, guild_presets: dict):
         options = [
-            discord.SelectOption(
-                label=name,
-                description=data.get("note", "")[:50] or "No notes",
-                value=name
-            )
+            discord.SelectOption(label=name, description=data.get("note", "")[:50] or "No notes", value=name)
             for name, data in list(guild_presets.items())[:25]
         ]
-        super().__init__(placeholder="Choose a preset to load...", options=options, row=0)
-
+        super().__init__(placeholder="Choose a preset to view...", options=options, row=0)
     async def callback(self, interaction: discord.Interaction):
-        gid = str(self.guild.id)
+        gid         = str(interaction.guild_id)
         preset_name = self.values[0]
-        preset = presets.get(gid, {}).get(preset_name)
+        preset      = presets.get(gid, {}).get(preset_name)
         if not preset:
             await send_minimal(interaction, f"⚠️ Preset **{preset_name}** not found.")
             return
@@ -512,7 +491,6 @@ class PresetSelect(discord.ui.Select):
         lines.append("")
         for vc_name, members in preset["teams"].items():
             lines.append(f"**{vc_name}**: {', '.join(members)}")
-        lines.append("\n_Teams shown above are from the saved preset. Use /teams to send players._")
         await send_minimal(interaction, "\n".join(lines))
 
 # ─────────────────────────────────────────────
@@ -522,7 +500,6 @@ class PresetSelect(discord.ui.Select):
 class TeamHistoryView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=60)
-        self.guild = guild
         gid = str(guild.id)
         history = team_history.get(gid, [])
         if history:
@@ -530,15 +507,11 @@ class TeamHistoryView(discord.ui.View):
 
 class TeamHistorySelect(discord.ui.Select):
     def __init__(self, history: list):
-        options = [
-            discord.SelectOption(label=entry["label"][:50], value=str(i))
-            for i, entry in enumerate(history[:25])
-        ]
+        options = [discord.SelectOption(label=entry["label"][:50], value=str(i)) for i, entry in enumerate(history[:25])]
         super().__init__(placeholder="Choose a past team configuration...", options=options, row=0)
-
     async def callback(self, interaction: discord.Interaction):
-        gid = str(interaction.guild_id)
-        idx = int(self.values[0])
+        gid     = str(interaction.guild_id)
+        idx     = int(self.values[0])
         history = team_history.get(gid, [])
         if idx >= len(history):
             await send_minimal(interaction, "⚠️ Entry not found.")
@@ -558,9 +531,9 @@ class TeamBuilderView(discord.ui.View):
         super().__init__(timeout=600)
         self.guild = guild
         all_voice_members = list({m.id: m for vc in guild.voice_channels for m in vc.members}.values())
-        voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
+        vcs = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
         self.member_select  = TeamMemberSelect(all_voice_members)
-        self.channel_select = TeamChannelSelect(voice_channels)
+        self.channel_select = TeamChannelSelect(vcs)
         self.add_item(self.member_select)
         self.add_item(self.channel_select)
 
@@ -627,15 +600,13 @@ class TeamBuilderView(discord.ui.View):
     async def randomise_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             "🎲 **Randomise Teams**\nPick channels — all players in voice will be shuffled evenly.",
-            view=RandomiseView(self.guild), ephemeral=True
-        )
+            view=RandomiseView(self.guild), ephemeral=True)
 
     @discord.ui.button(label="⚖️ Balanced Teams", style=discord.ButtonStyle.primary, row=3)
     async def balanced_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             "⚖️ **MMR Balanced Teams**\nPlayers distributed by UNSC rank using a snake draft.",
-            view=MatchmakeView(self.guild), ephemeral=True
-        )
+            view=MatchmakeView(self.guild), ephemeral=True)
 
     @discord.ui.button(label="💾 Save Preset", style=discord.ButtonStyle.secondary, row=3)
     async def save_preset(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -685,9 +656,9 @@ class TeamMemberSelect(discord.ui.Select):
         await send_minimal(interaction, f"✅ Selected: **{names}**")
 
 class TeamChannelSelect(discord.ui.Select):
-    def __init__(self, voice_channels):
+    def __init__(self, vcs):
         self.selected_vc_id = None
-        options = [discord.SelectOption(label=c.name, value=str(c.id)) for c in voice_channels[:25]]
+        options = [discord.SelectOption(label=c.name, value=str(c.id)) for c in vcs[:25]]
         super().__init__(placeholder="2️⃣ Pick their team channel...", options=options,
                          min_values=1, max_values=1, row=1)
     async def callback(self, interaction: discord.Interaction):
@@ -725,8 +696,7 @@ async def recall(interaction: discord.Interaction):
 async def set_lobby(interaction: discord.Interaction):
     await interaction.response.send_message(
         "🔧 **Lobby Mapper**\n1️⃣ Pick source channels → 2️⃣ Pick destination → 💾 Save",
-        view=LobbyMappingView(interaction.guild), ephemeral=True
-    )
+        view=LobbyMappingView(interaction.guild), ephemeral=True)
 
 
 @bot.tree.command(name="teams", description="[Admin] Build teams and send members to voice channels.")
@@ -740,8 +710,7 @@ async def teams(interaction: discord.Interaction):
         "1️⃣ Pick members → 2️⃣ Pick channel → ➕ Assign → Repeat → 🚀 Send!\n"
         "🎲 Randomise or ⚖️ Balanced for automatic generation | 💾 Save Preset to store this lineup\n"
         "Use 🔁 to recall everyone back between rounds.",
-        view=TeamBuilderView(interaction.guild), ephemeral=True
-    )
+        view=TeamBuilderView(interaction.guild), ephemeral=True)
 
 
 @bot.tree.command(name="import_mmr", description="[Admin] Import player stats from your session Excel file.")
@@ -752,39 +721,32 @@ async def import_mmr(interaction: discord.Interaction, file: discord.Attachment)
         return
     await interaction.response.defer(ephemeral=True)
     try:
-        data = await file.read()
         import openpyxl
-
-        wb = openpyxl.load_workbook(io.BytesIO(data))
-        gid = str(interaction.guild_id)
+        data = await file.read()
+        wb   = openpyxl.load_workbook(io.BytesIO(data))
+        gid  = str(interaction.guild_id)
         if gid not in mmr_data:
             mmr_data[gid] = {}
 
-        session_sheets = [s for s in wb.sheetnames if s.lower() not in ("leaderboard", "collective stats")]
-        all_imported = []
+        # Identify session sheets (skip leaderboard / collective sheets)
+        skip_keywords = ("leaderboard", "collective", "summary")
+        session_sheets = [s for s in wb.sheetnames if not any(k in s.lower() for k in skip_keywords)]
+
+        # per_player accumulates history: canonical_name -> list of session dicts
+        per_player: dict = {}
 
         for sheet_name in session_sheets:
-            ws = wb[sheet_name]
+            ws      = wb[sheet_name]
             players = parse_session_sheet(ws)
             if not players:
                 continue
-            players = calculate_mmr(players)
-
+            players = calculate_mmr_for_session(players)
             for p in players:
-                name = p["name"]
-                if name not in mmr_data[gid]:
-                    mmr_data[gid][name] = {"history": []}
-                # Avoid duplicate session entries
-                existing_sessions = [h["session"] for h in mmr_data[gid][name].get("history", [])]
-                if sheet_name not in existing_sessions:
-                    mmr_data[gid][name].setdefault("history", []).append({
-                        "session": sheet_name,
-                        "mmr":     p["mmr"],
-                        "kd":      p["kd"],
-                        "points":  p["points"],
-                    })
-                # Always update current stats to latest session
-                mmr_data[gid][name].update({
+                cname = p["name"]
+                if cname not in per_player:
+                    per_player[cname] = []
+                per_player[cname].append({
+                    "session":  sheet_name,
                     "mmr":      p["mmr"],
                     "kd":       p["kd"],
                     "points":   p["points"],
@@ -792,47 +754,49 @@ async def import_mmr(interaction: discord.Interaction, file: discord.Attachment)
                     "assists":  p["assists"],
                     "captures": p["captures"],
                 })
-            all_imported.extend(players)
 
-        # If it's the leaderboard format (single sheet), fall back to that
-        if not all_imported and "Leaderboard" in wb.sheetnames:
-            ws = wb["Leaderboard"]
-            rows = list(ws.iter_rows(values_only=True))
-            header = [str(h).strip().lower() if h else "" for h in rows[0]]
-            def col(n):
-                return next((i for i, h in enumerate(header) if n in h), None)
-            idx = {"name": col("player name") or col("name"), "kd": col("k/d"),
-                   "points": col("total points"), "obj_time": col("time in obj"),
-                   "assists": col("total assists"), "captures": col("captures")}
-            players = []
-            for row in rows[1:]:
-                try:
-                    name = str(row[idx["name"]]).strip() if row[idx["name"]] else None
-                    if not name or name.lower() == "none": continue
-                    players.append({"name": name, "kd": float(row[idx["kd"]] or 0),
-                                    "points": float(row[idx["points"]] or 0),
-                                    "obj_time": float(row[idx["obj_time"]] or 0),
-                                    "assists": float(row[idx["assists"]] or 0),
-                                    "captures": float(row[idx["captures"]] or 0)})
-                except: continue
-            players = calculate_mmr(players)
-            for p in players:
-                mmr_data[gid][p["name"]] = {**mmr_data[gid].get(p["name"], {}), **p}
-            all_imported = players
+        if not per_player:
+            await followup_minimal(interaction, "⚠️ No valid session data found in the file.", ephemeral=True)
+            return
+
+        # Compute overall MMR as average across all sessions played
+        imported_summary = []
+        for cname, sessions_list in per_player.items():
+            avg_mmr = round(sum(s["mmr"] for s in sessions_list) / len(sessions_list), 1)
+            latest  = sessions_list[-1]
+
+            # Merge into mmr_data — preserve existing history, avoid duplicate sessions
+            existing = mmr_data[gid].get(cname, {})
+            existing_sessions = [h["session"] for h in existing.get("history", [])]
+            new_history = existing.get("history", [])
+            for s in sessions_list:
+                if s["session"] not in existing_sessions:
+                    new_history.append({"session": s["session"], "mmr": s["mmr"],
+                                        "kd": s["kd"], "points": s["points"]})
+
+            mmr_data[gid][cname] = {
+                "mmr":      avg_mmr,
+                "kd":       latest["kd"],
+                "points":   latest["points"],
+                "obj_time": latest["obj_time"],
+                "assists":  latest["assists"],
+                "captures": latest["captures"],
+                "sessions": len(sessions_list),
+                "history":  new_history,
+            }
+            imported_summary.append((cname, avg_mmr))
 
         save_json(MMR_FILE, mmr_data)
 
-        # Build summary sorted by final MMR
-        unique = {p["name"]: p for p in all_imported}
-        sorted_players = sorted(unique.values(), key=lambda x: x["mmr"], reverse=True)
+        imported_summary.sort(key=lambda x: x[1], reverse=True)
         lines = []
-        for p in sorted_players:
-            rank_name, rank_emoji = unsc_rank(p["mmr"])
-            lines.append(f"{rank_emoji} **{p['name']}** — {p['mmr']} MMR | {rank_name}")
+        for cname, avg_mmr in imported_summary:
+            rname, remoji = unsc_rank(avg_mmr)
+            lines.append(f"{remoji} **{cname}** — {avg_mmr} MMR | *{rname}*")
 
         await followup_minimal(
             interaction,
-            f"✅ Imported **{len(sorted_players)}** players from **{len(session_sheets)}** session(s)!\n\n" + "\n".join(lines),
+            f"✅ Imported **{len(imported_summary)}** players from **{len(session_sheets)}** session(s)!\n\n" + "\n".join(lines),
             ephemeral=True
         )
     except Exception as e:
@@ -848,10 +812,11 @@ async def leaderboard(interaction: discord.Interaction):
     sorted_players = sorted(gmmr.items(), key=lambda x: x[1].get("mmr", 0), reverse=True)
     lines = ["🏆 **UNSC MMR Leaderboard**\n"]
     for rank, (name, data) in enumerate(sorted_players, 1):
-        mmr = data.get("mmr", 0)
-        rank_name, rank_emoji = unsc_rank(mmr)
-        pos = mmr_rank_emoji(rank)
-        lines.append(f"{pos} {rank_emoji} **{name}** — {mmr} MMR | *{rank_name}*")
+        mmr      = data.get("mmr", 0)
+        sessions = data.get("sessions", "?")
+        rname, remoji = unsc_rank(mmr)
+        pos = leaderboard_pos_emoji(rank)
+        lines.append(f"{pos} {remoji} **{name}** — {mmr} MMR | *{rname}* | {sessions} session(s)")
     await send_minimal(interaction, "\n".join(lines), ephemeral=False)
 
 
@@ -861,35 +826,35 @@ async def mmr_lookup(interaction: discord.Interaction, player: str):
     match = next((v for k, v in gmmr.items() if k.lower() == player.lower()), None)
     name  = next((k for k in gmmr if k.lower() == player.lower()), player)
     if not match:
-        await send_minimal(interaction, f"⚠️ No MMR data found for **{player}**.")
+        await send_minimal(interaction, f"⚠️ No MMR data found for **{player}**.\nTry using just the first name, e.g. `Jacob`")
         return
-    sorted_all  = sorted(gmmr.values(), key=lambda x: x.get("mmr", 0), reverse=True)
-    rank_pos    = next((i+1 for i, p in enumerate(sorted_all) if p.get("mmr") == match.get("mmr")), "?")
-    rank_name, rank_emoji = unsc_rank(match.get("mmr", 0))
+    sorted_all = sorted(gmmr.values(), key=lambda x: x.get("mmr", 0), reverse=True)
+    rank_pos   = next((i+1 for i, p in enumerate(sorted_all) if p.get("mmr") == match.get("mmr")), "?")
+    rname, remoji = unsc_rank(match.get("mmr", 0))
 
     lines = [
-        f"**{name}** {rank_emoji} *{rank_name}*",
-        f"MMR: **{match.get('mmr', '?')}** | Rank: **#{rank_pos}**",
+        f"**{name}** {remoji} *{rname}*",
+        f"MMR: **{match.get('mmr','?')}** (avg across {match.get('sessions','?')} session(s)) | Rank: **#{rank_pos}**",
         f"K/D: {match.get('kd','?')} | Points: {match.get('points','?')} | "
         f"Obj Time: {match.get('obj_time','?')}s | Assists: {match.get('assists','?')} | Captures: {match.get('captures','?')}",
     ]
 
-    # Rating history
     history = match.get("history", [])
     if history:
-        lines.append("\n📈 **Rating History**")
-        for i, h in enumerate(history):
-            h_rank, h_emoji = unsc_rank(h["mmr"])
-            # Trend arrow
-            if i == 0:
+        lines.append("\n📈 **Session History**")
+        prev_mmr = None
+        for h in history:
+            h_rname, h_remoji = unsc_rank(h["mmr"])
+            if prev_mmr is None:
                 arrow = ""
-            elif h["mmr"] > history[i-1]["mmr"]:
+            elif h["mmr"] > prev_mmr:
                 arrow = " ▲"
-            elif h["mmr"] < history[i-1]["mmr"]:
+            elif h["mmr"] < prev_mmr:
                 arrow = " ▼"
             else:
                 arrow = " ─"
-            lines.append(f"> {h_emoji} **{h['session']}**: {h['mmr']} MMR (*{h_rank}*){arrow}")
+            lines.append(f"> {h_remoji} **{h['session']}**: {h['mmr']} MMR (*{h_rname}*){arrow}")
+            prev_mmr = h["mmr"]
 
     await send_minimal(interaction, "\n".join(lines), ephemeral=False)
 
@@ -898,28 +863,24 @@ async def mmr_lookup(interaction: discord.Interaction, player: str):
 @is_admin()
 async def view_presets(interaction: discord.Interaction):
     gid = str(interaction.guild_id)
-    guild_presets = presets.get(gid, {})
-    if not guild_presets:
+    if not presets.get(gid):
         await send_minimal(interaction, "⚠️ No presets saved yet. Use 💾 Save Preset in `/teams`.")
         return
     await interaction.response.send_message(
         "📋 **Saved Team Presets** — select one to view:",
-        view=LoadPresetView(interaction.guild), ephemeral=True
-    )
+        view=LoadPresetView(interaction.guild), ephemeral=True)
 
 
 @bot.tree.command(name="history", description="[Admin] View past team configurations.")
 @is_admin()
 async def view_history(interaction: discord.Interaction):
     gid = str(interaction.guild_id)
-    history = team_history.get(gid, [])
-    if not history:
+    if not team_history.get(gid):
         await send_minimal(interaction, "⚠️ No team history yet. History is saved when you send or randomise teams.")
         return
     await interaction.response.send_message(
         "📜 **Team History** — select an entry to view:",
-        view=TeamHistoryView(interaction.guild), ephemeral=True
-    )
+        view=TeamHistoryView(interaction.guild), ephemeral=True)
 
 # ─────────────────────────────────────────────
 # ERROR HANDLERS
