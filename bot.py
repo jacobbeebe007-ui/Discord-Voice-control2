@@ -996,11 +996,15 @@ async def mmr_lookup(interaction: discord.Interaction, player: str):
     sessions_needed = PROVISIONAL_SESSIONS - sessions
     prov_note       = f"\n_* Provisional — needs {sessions_needed} more session(s) to confirm rank._" if sessions < PROVISIONAL_SESSIONS else ""
 
+    kills  = match.get("kills", 0)
+    deaths = match.get("deaths", 0)
+    assists = match.get("assists", 0)
+    kda    = round((kills + assists) / max(deaths, 1), 2)
     lines = [
         f"**{name}** {remoji} *{rname}*{prov} — Rank **#{rank_pos} / {total_players}**{prov_note}",
         f"Overall MMR: **{mmr}** | Sessions: **{sessions}**",
-        f"Kills: {match.get('kills','?')} | Deaths: {match.get('deaths','?')} | K/D: {match.get('kd','?')} | "
-        f"Assists: {match.get('assists','?')} | Points: {match.get('points','?')} | "
+        f"Kills: {kills} | Deaths: {deaths} | K/D: {match.get('kd','?')} | KDA: {kda} | "
+        f"Assists: {assists} | Points: {match.get('points','?')} | "
         f"Obj Time: {match.get('obj_time','?')}s | Captures: {match.get('captures','?')}",
     ]
     history = match.get("history", [])
@@ -1041,11 +1045,15 @@ async def rank(interaction: discord.Interaction):
     prov          = " *" if sessions < PROVISIONAL_SESSIONS else ""
     prov_note     = f"\n_* {PROVISIONAL_SESSIONS - sessions} more session(s) until your rank is confirmed._" if sessions < PROVISIONAL_SESSIONS else ""
 
+    rk = match.get("kills", 0)
+    rd = match.get("deaths", 0)
+    ra = match.get("assists", 0)
+    rkda = round((rk + ra) / max(rd, 1), 2)
     await send_minimal(interaction,
         f"**{dname}** {remoji} *{rname}*{prov} — Rank **#{rank_pos} / {total_players}**{prov_note}\n"
         f"MMR: **{mmr}** | Sessions: **{sessions}**\n"
-        f"Kills: {match.get('kills','?')} | Deaths: {match.get('deaths','?')} | K/D: {match.get('kd','?')} | "
-        f"Assists: {match.get('assists','?')} | Points: {match.get('points','?')} | "
+        f"Kills: {rk} | Deaths: {rd} | K/D: {match.get('kd','?')} | KDA: {rkda} | "
+        f"Assists: {ra} | Points: {match.get('points','?')} | "
         f"Obj Time: {match.get('obj_time','?')}s | Captures: {match.get('captures','?')}",
         ephemeral=True)
 
@@ -1245,11 +1253,32 @@ async def admin_error(interaction: discord.Interaction, error):
 # STARTUP
 # ─────────────────────────────────────────────
 
+@bot.tree.command(name="sync", description="[Admin] Force sync slash commands if they are missing.")
+@is_admin()
+async def sync_commands(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    await bot.tree.sync()
+    await bot.tree.sync(guild=interaction.guild)
+    await interaction.followup.send("✅ Commands synced! New commands should appear within 30 seconds.", ephemeral=True)
+
+@sync_commands.error
+async def sync_error(interaction: discord.Interaction, error):
+    if isinstance(error, app_commands.CheckFailure):
+        await send_minimal(interaction, "❌ Administrator permissions required.")
+    else:
+        raise error
+
 @bot.event
 async def on_ready():
     await bot.tree.sync()
+    # Also sync to each guild for instant availability
+    for guild in bot.guilds:
+        try:
+            await bot.tree.sync(guild=guild)
+        except Exception:
+            pass
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
-    print("   Slash commands synced.")
+    print(f"   Slash commands synced to {len(bot.guilds)} guild(s).")
 
 if __name__ == "__main__":
     bot.run(TOKEN)
