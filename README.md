@@ -1,206 +1,213 @@
-# 🎮 Discord Voice Control Bot
+# 🎮 Halo Night Bot
 
-A Discord bot for managing voice channels during Halo gaming sessions — recall players to lobbies, build teams manually, randomise them, or generate MMR-balanced teams using UNSC rankings derived from your real session stats.
+A Discord bot built for Halo game nights. Manages voice channel teams, tracks player MMR across sessions, runs matchmaking rolls with map images, and provides a full stat leaderboard system using Halo Reach ranks.
+
+---
+
+## Features
+
+- **Team management** — manually build teams, randomise, or balance by MMR using a snake draft
+- **MMR tracking** — import session stats from Excel, calculate overall MMR from cumulative leaderboard data
+- **Halo Reach rank system** — 22 ranks from Recruit to Inheritor with custom server emojis
+- **Matchmaking roller** — roll Halo 3 maps, game types and teams with a veto system
+- **Stat commands** — leaderboard, player lookup, session breakdown, head-to-head rivals, compare, top stats
+
+---
+
+## Setup
+
+### Requirements
+
+- Python 3.10+
+- A Discord bot token ([discord.com/developers](https://discord.com/developers/applications))
+- The following packages:
+
+```
+discord.py==2.3.2
+python-dotenv==1.0.0
+audioop-lts==0.2.1
+openpyxl==3.1.2
+```
+
+Install with:
+```bash
+pip install -r requirements.txt
+```
+
+### Environment
+
+Create a `.env` file in the project root:
+```
+DISCORD_BOT_TOKEN=your_token_here
+```
+
+### Running locally
+
+```bash
+python bot.py
+```
+
+### Deploying to Railway
+
+1. Push to a GitHub repo
+2. Connect the repo to [Railway](https://railway.app)
+3. Add `DISCORD_BOT_TOKEN` as an environment variable in Railway
+4. Railway will auto-deploy on every push to `main`
+
+---
+
+## Bot Permissions
+
+The bot requires the following permissions in your Discord server:
+
+- Move Members
+- Send Messages
+- Embed Links
+- Read Message History
+- Use Application Commands
+
+Enable the following **Privileged Gateway Intents** in the Discord Developer Portal:
+- Server Members Intent
+- Message Content Intent
+
+---
+
+## Custom Emojis
+
+The bot uses custom server emojis for the 22 Halo Reach ranks. Upload the following emojis to your server with **exact names**:
+
+| Emoji Name | Rank |
+|---|---|
+| `000_Recruit` | Recruit |
+| `001_Private` | Private |
+| `002_Corporal` | Corporal |
+| `003_Sergeant` | Sergeant |
+| `004_Warrant_Officer` | Warrant Officer |
+| `005_Captain` | Captain |
+| `006_Major` | Major |
+| `007_Lt_Colonel` | Lt. Colonel |
+| `008_Commander` | Commander |
+| `009_Colonel` | Colonel |
+| `010_Brigadier` | Brigadier |
+| `011_General` | General |
+| `012_Field_Marshall` | Field Marshall |
+| `013_Hero` | Hero |
+| `014_Legend` | Legend |
+| `015_Mythic` | Mythic |
+| `016_Noble` | Noble |
+| `017_Eclipse` | Eclipse |
+| `018_Nova` | Nova |
+| `019_Forerunner` | Forerunner |
+| `020_Reclaimer` | Reclaimer |
+| `021_Inheritor` | Inheritor |
 
 ---
 
 ## Commands
 
-| Command | Who | Description |
-|---|---|---|
-| `/teams` | Admin | Open the Team Builder panel |
-| `/set_lobby` | Admin | Map voice channels to a lobby destination |
-| `/recall` | Admin | Move all voice members to their mapped lobbies |
-| `/import_mmr` | Admin | Import player stats from your session Excel file |
-| `/leaderboard` | Everyone | View the full UNSC MMR leaderboard |
-| `/mmr [player]` | Everyone | Look up a player's MMR, rank, and rating history |
-| `/presets` | Admin | View and load saved team presets |
-| `/history` | Admin | View past team configurations |
+### Everyone
 
----
-
-## /teams — Team Builder
-
-The main control panel. All features are buttons inside this panel.
-
-### Manual Teams
-1. Pick members from dropdown 1️⃣
-2. Pick their destination channel from dropdown 2️⃣
-3. Click ➕ **Assign to Team**
-4. Repeat for each team
-5. Click 🚀 **Send Teams** to move everyone
-
-> Players can only be on one team. Reassigning moves them automatically.
-
-### 🎲 Randomise Teams
-1. Click 🎲 **Randomise Teams**
-2. Pick 2 or more voice channels
-3. Click 🎲 **Randomise!** — all players in voice are shuffled evenly and moved instantly
-
-### ⚖️ Balanced Teams (MMR)
-1. Click ⚖️ **Balanced Teams**
-2. Pick 2 or more voice channels
-3. Click ⚖️ **Generate Balanced Teams** — players are distributed using a snake draft based on MMR so teams are as even as possible
-
-### 💾 Save Preset
-Saves the current team layout with a name and optional note (e.g. *"6v6 Competitive — sweaty lineup"*). Load presets any time with `/presets`.
-
-### Other Buttons
-
-| Button | What it does |
+| Command | Description |
 |---|---|
-| 📋 Show Teams | Display current assignments with MMR |
-| 🗑️ Clear Teams | Wipe all team assignments |
-| 🔁 Recall All to Lobby | Pull everyone back to their mapped lobby |
+| `/rank` | Check your own current rank, MMR and stats |
+| `/mmr [player]` | Full stats, rank history and session breakdown for a player |
+| `/leaderboard` | Full MMR leaderboard grouped by Halo Reach rank |
+| `/compare [p1] [p2]` | Side by side stat comparison with winners highlighted |
+| `/rivals [p1] [p2]` | Head-to-head session history and overall win tally |
+| `/stats` | Top performer in every stat category |
+| `/session [session] [player]` | A player's stats from a specific session e.g. `Session 1` |
+| `/matchmaking` | Roll Halo 3 maps, game types and teams — single or two match with veto |
+| `/help` | List all commands available to you |
 
-Team configurations are automatically saved to history whenever you use 🚀 Send Teams, 🎲 Randomise, or ⚖️ Balanced Teams.
+### Admin Only
 
----
-
-## /set_lobby — Lobby Mapper
-
-1. Pick one or more **source** channels (recalled FROM) using dropdown 1️⃣
-2. Pick the **destination** lobby channel (recalled TO) using dropdown 2️⃣
-3. Click 💾 **Save Mapping**
-
-Run `/set_lobby` multiple times to set different channels pointing to different lobbies. Mappings persist across restarts.
-
----
-
-## /import_mmr — Importing Stats
-
-Upload your Excel file directly in Discord. The bot supports two formats:
-
-**Multi-session file** (recommended) — your `Collection_of_Stats_across_Halo_Nights.xlsx` style with one sheet per session (e.g. Session 1, Session 2...). The bot reads every session sheet, calculates MMR for each independently, and stores the full history per player.
-
-**Leaderboard file** — a single sheet with cumulative stats. Used as a fallback if no session sheets are found.
-
-### Expected Columns (per session sheet)
-| Column | Used for |
+| Command | Description |
 |---|---|
-| Player Name | Player identifier |
-| K/D Ratio | 30% of MMR |
-| Total Points | 25% of MMR |
-| Time in Obj (sec) | 25% of MMR |
-| Total Assists | 15% of MMR |
-| Captures | 5% of MMR |
-
-MMR is normalised 0–100 within each session so every session is fairly weighted regardless of overall score inflation.
+| `/teams` | Open the Team Builder — assign, randomise, balance and send teams |
+| `/sub [player_out] [player_in]` | Swap two players between active teams |
+| `/recall` | Move all voice members back to their mapped lobby channels |
+| `/set_lobby` | Map voice channels to lobby destinations for `/recall` |
+| `/import_mmr` | Upload a session Excel file to update all player MMR and history |
+| `/export` | Download the current MMR data as a timestamped JSON backup |
+| `/presets` | View and load saved team lineup presets |
+| `/history` | Browse the last 10 team configurations |
+| `/sync` | Force re-sync slash commands if any are missing |
 
 ---
 
-## UNSC Rank System
+## MMR System
 
-MMR maps to UNSC military ranks:
+MMR is calculated from the **cumulative Leaderboard sheet** in your Excel file using weighted stats:
 
-| MMR | Rank |
+| Stat | Weight |
 |---|---|
-| 95–100 | ⭐ Spartan |
-| 88–94 | 🔱 Inheritor |
-| 80–87 | 💠 Reclaimer |
-| 72–79 | 🔷 Forerunner |
-| 63–71 | 🟣 Legendary |
-| 54–62 | 🟤 Mythic |
-| 45–53 | ⬛ Onyx |
-| 36–44 | 💎 Diamond |
-| 27–35 | 🩶 Platinum |
-| 18–26 | 🥇 Gold |
-| 10–17 | 🩵 Silver |
-| 0–9 | 🟫 Bronze |
+| K/D Ratio | 30% |
+| Total Points | 25% |
+| Obj Time | 25% |
+| Assists | 15% |
+| Captures | 5% |
+
+Each stat is normalised 0–100 relative to all players in that import, then weighted and summed. The result is an overall MMR between 0 and 100.
+
+Players with fewer than 3 sessions are marked as **provisional** with an asterisk `*` and their rank is not yet confirmed.
+
+### Excel File Structure
+
+The bot expects sheets named:
+- **`Leaderboard`** — cumulative stats across all sessions (used for overall MMR)
+- **`Session 1`, `Session 2`, ...** — individual session sheets (used for history and session ranks)
+
+Sheets named `Collective` or `Summary` are ignored.
 
 ---
 
-## /mmr [player] — Player Lookup
+## Matchmaking
 
-Shows a player's current MMR, UNSC rank, leaderboard position, all stats, and their full session-by-session rating history with trend arrows (▲ improved / ▼ dropped / ─ same).
+`/matchmaking` supports **Halo 3** maps and game types.
 
-Example:
-```
-Jacob ⭐ Spartan
-MMR: 100.0 | Rank: #1
-K/D: 2.24 | Points: 381 | Obj Time: 1057s | Assists: 446 | Captures: 2
+**Single Match mode:**
+- Choose number of teams (2–8)
+- Choose map pool (standard only or all DLC)
+- Rolls one map + game type, posts publicly with map image
 
-📈 Rating History
-> ⭐ Session 1: 89.0 MMR (Reclaimer)
-> 💠 Session 2: 80.3 MMR (Reclaimer) ▼
-> ⭐ Session 3: 97.7 MMR (Inheritor) ▲
-> 🔷 Session 4: 79.6 MMR (Reclaimer) ▼
-> 🟣 Session 5: 71.5 MMR (Legendary) ▼
-```
+**Two Matches mode:**
+- Same setup, rolls two matches simultaneously
+- Posts both as embeds with map images
+- Veto system: each match has a Map veto and a Game Type veto button
+- Each veto rerolls that slot once — buttons disable after use
+- Lock In confirms the final matches
 
----
+**Maps included:**
 
-## /presets — Saved Team Presets
+Standard: Construct, Epitaph, Guardian, High Ground, Isolation, Last Resort, Narrows, Sandtrap, Snowbound, The Pit, Valhalla
 
-View and reload any saved team configuration. Each preset stores:
-- The team name
-- An optional note
-- Which players were assigned to which channel
+DLC: Foundry, Rat's Nest, Standoff, Avalanche, Blackout, Ghost Town, Assembly, Citadel, Heretic, Longshore, Orbital, Sandbox
+
+**Game Types:** Slayer, Team Slayer, Capture the Flag, Oddball, King of the Hill, VIP, Territories, Assault, Infection
 
 ---
 
-## /history — Team History
+## Data Persistence
 
-The bot automatically saves the last 10 team configurations whenever teams are dispatched or generated. Use `/history` to view or recall any past setup.
+All data is saved to JSON files in the bot's working directory:
 
----
+| File | Contents |
+|---|---|
+| `mmr_data.json` | All player MMR, stats and session history |
+| `lobby_map.json` | Voice channel → lobby mappings |
+| `presets.json` | Saved team presets |
+| `team_history.json` | Last 10 team configurations |
 
-## Deployment (Railway via GitHub)
-
-### 1. Create your Discord bot
-1. Go to https://discord.com/developers/applications → **New Application**
-2. Go to **Bot** tab → **Add Bot** → copy the **Token**
-3. Enable under **Privileged Gateway Intents**:
-   - ✅ Server Members Intent
-   - ✅ Message Content Intent
-4. Go to **OAuth2 → Redirects** → add `https://localhost` → Save
-5. Go to **OAuth2 → URL Generator**:
-   - Scopes: `bot`, `applications.commands`
-   - Permissions: `Move Members`, `Send Messages`, `Use Slash Commands`
-6. Open the generated URL and invite the bot to your server
-
-### 2. Push to GitHub
-Make sure these files are in your repo:
-```
-bot.py
-requirements.txt
-.env.example
-.gitignore
-README.md
-```
-> ⚠️ Never commit `.env` — your token must stay out of GitHub
-
-### 3. Deploy on Railway
-1. Go to https://railway.app → sign up with GitHub
-2. **New Project** → **Deploy from GitHub repo** → select your repo
-3. Go to **Variables** tab → add:
-   - `DISCORD_BOT_TOKEN` = your bot token
-4. Railway auto-detects Python and runs `pip install -r requirements.txt`
-5. Set **Start Command** to `python bot.py` under Settings if not auto-detected
-
-Railway's free tier includes $5 credit/month which resets monthly — more than enough for this bot.
+These persist across redeployments as long as Railway's volume is attached. Use `/export` regularly to keep a backup.
 
 ---
 
-## Running Locally
+## Development
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env
-# Edit .env and paste your token after DISCORD_BOT_TOKEN=
-python bot.py
-```
+To add a new command:
 
----
-
-## Data Storage
-
-| File | Contents | Persists |
-|---|---|---|
-| `lobby_map.json` | Voice channel → lobby mappings | ✅ Disk |
-| `mmr_data.json` | Player MMR, stats, session history | ✅ Disk |
-| `presets.json` | Saved team presets with notes | ✅ Disk |
-| `team_history.json` | Last 10 team configurations | ✅ Disk |
-| Team assignments | Active team session | ❌ Memory only |
-
-> Note: Railway persists files between deploys. If you ever redeploy from scratch, re-upload your stats file with `/import_mmr` to restore MMR data.
+1. Add `@bot.tree.command(name="...", description="...")` — prefix description with `[Admin]` for admin-only commands
+2. Add the `@is_admin()` decorator if admin only
+3. Add the error handler to the `@<command>.error` block at the bottom
+4. Push to GitHub — Railway redeploys automatically
+5. The `/help` command updates itself automatically — no manual changes needed
