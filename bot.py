@@ -14,6 +14,8 @@ TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 if not TOKEN:
     raise ValueError("DISCORD_BOT_TOKEN is not set in your environment or .env file.")
 
+
+
 intents = discord.Intents.default()
 intents.members = True
 intents.voice_states = True
@@ -181,9 +183,7 @@ def parse_leaderboard_sheet(ws) -> list:
 def get_guild_mmr(guild_id: int) -> dict:
     return mmr_data.get(str(guild_id), {})
 
-# ─────────────────────────────────────────────
-# MESSAGING HELPERS
-# ─────────────────────────────────────────────
+
 
 class DismissView(discord.ui.View):
     def __init__(self):
@@ -850,18 +850,36 @@ async def sub(interaction: discord.Interaction, player_out: str, player_in: str)
         f"{build_team_summary(guild, gid)}", ephemeral=False)
 
 
-@bot.tree.command(name="import_mmr", description="[Admin] Import player stats from your session Excel file.")
+STATS_FILE = "Collection_of_Stats_across_Halo_Nights.xlsx"
+
+@bot.tree.command(name="import_mmr", description="[Admin] Import stats from the repo file, or upload a new one.")
 @is_admin()
-async def import_mmr(interaction: discord.Interaction, file: discord.Attachment):
-    if not file.filename.endswith((".xlsx", ".csv")):
-        await send_minimal(interaction, "⚠️ Please upload a `.xlsx` or `.csv` file.")
-        return
+async def import_mmr(interaction: discord.Interaction, file: discord.Attachment = None):
     await interaction.response.defer(ephemeral=True)
     try:
         import openpyxl
-        wb  = openpyxl.load_workbook(io.BytesIO(await file.read()))
+
+        # Determine source: uploaded file > repo file
+        if file is not None:
+            if not file.filename.endswith((".xlsx", ".csv")):
+                await interaction.followup.send("⚠️ Please upload a `.xlsx` or `.csv` file.", ephemeral=True)
+                return
+            wb = openpyxl.load_workbook(io.BytesIO(await file.read()))
+            source_label = f"uploaded file `{file.filename}`"
+        elif os.path.exists(STATS_FILE):
+            wb = openpyxl.load_workbook(STATS_FILE)
+            source_label = f"`{STATS_FILE}` from repo"
+        else:
+            msg = (
+                f"⚠️ No file uploaded and `{STATS_FILE}` was not found in the repo.\n"
+                f"Either upload a file directly, or commit `{STATS_FILE}` to your GitHub repo."
+            )
+            await interaction.followup.send(msg, ephemeral=True)
+            return
+
         gid = str(interaction.guild_id)
-        if gid not in mmr_data: mmr_data[gid] = {}
+        if gid not in mmr_data:
+            mmr_data[gid] = {}
 
         skip = ("collective", "summary")
         session_sheets = [s for s in wb.sheetnames if not any(k in s.lower() for k in skip) and s.lower() != "leaderboard"]
@@ -906,7 +924,7 @@ async def import_mmr(interaction: discord.Interaction, file: discord.Attachment)
         all_names = set(per_player.keys()) | set(overall_mmr.keys())
         imported  = []
         for cname in all_names:
-            existing = mmr_data[gid].get(cname, {})
+            existing      = mmr_data[gid].get(cname, {})
             sessions_list = per_player.get(cname, [])
             lb = overall_mmr.get(cname) or next(
                 (v for k, v in overall_mmr.items() if k.lower() == cname.lower()), None)
@@ -958,7 +976,10 @@ async def import_mmr(interaction: discord.Interaction, file: discord.Attachment)
             prov   = "*" if sessions < PROVISIONAL_SESSIONS else ""
             lines.append(f"{remoji} **{cname}**{prov} — {mmr} MMR")
 
-        header = f"✅ Imported **{len(imported)}** players!\n_* = Provisional (fewer than {PROVISIONAL_SESSIONS} sessions)_\n"
+        header = (
+            f"✅ Imported **{len(imported)}** players from {source_label}!\n"
+            f"_* = Provisional (fewer than {PROVISIONAL_SESSIONS} sessions)_\n"
+        )
         await send_single_or_chunked(interaction, lines, header=header, ephemeral=True)
 
     except Exception as e:
@@ -1604,7 +1625,7 @@ async def help_command(interaction: discord.Interaction):
         ("`/sub [out] [in]`",  "Swap two players between active teams."),
         ("`/recall`",          "Move all voice members back to their mapped lobby channels."),
         ("`/set_lobby`",       "Map voice channels to lobby destinations for `/recall`."),
-        ("`/import_mmr`",      "Upload a session Excel file to update all player MMR and history."),
+        ("`/import_mmr`",      "Sync MMR from repo Excel file, or upload a new file to override."),
         ("`/export`",          "Download the current MMR data as a JSON file backup."),
         ("`/presets`",         "View and load saved team lineup presets."),
         ("`/history`",         "Browse the last 10 team configurations."),

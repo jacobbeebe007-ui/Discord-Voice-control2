@@ -151,13 +151,19 @@ Each stat is normalised 0–100 relative to all players in that import, then wei
 
 Players with fewer than 3 sessions are marked as **provisional** with an asterisk `*` and their rank is not yet confirmed.
 
-### Excel File Structure
+### Excel File
 
-The bot expects sheets named:
+Commit `Collection_of_Stats_across_Halo_Nights.xlsx` to the root of your GitHub repo alongside `bot.py`. Railway will include it in the deployment and the bot reads it from disk.
+
+The bot expects the following sheets:
 - **`Leaderboard`** — cumulative stats across all sessions (used for overall MMR)
-- **`Session 1`, `Session 2`, ...** — individual session sheets (used for history and session ranks)
+- **`Session 1`, `Session 2`, ...** — individual session sheets (used for session history and ranks)
 
 Sheets named `Collective` or `Summary` are ignored.
+
+**Updating stats:** Edit your Excel file locally, commit and push to GitHub. Railway redeploys automatically and `/import_mmr` will read the updated file.
+
+**Override with upload:** You can also run `/import_mmr` with a file attached to import from that file directly, bypassing the repo file. Useful for testing before committing.
 
 ---
 
