@@ -139,18 +139,19 @@ def parse_session_sheet(ws) -> list:
         try:
             raw = str(row[0]).strip() if row[0] else None
             if not raw or raw.lower() in ("none", ""): continue
-            kd = 0.0
-            try: kd = float(row[4] or 0)
-            except: pass
+            def safe(val):
+                try: return float(val or 0)
+                except: return 0.0
             players.append({
-                "raw_name": raw, "name": canonical_name(raw),
-                "kd":       kd,
-                "kills":    float(row[1] or 0),
-                "assists":  float(row[2] or 0),
-                "deaths":   float(row[3] or 0),
-                "captures": float(row[6] or 0),
-                "obj_time": float(row[7] or 0),
-                "points":   float(row[9] or 0),
+                "raw_name": raw,
+                "name":     canonical_name(raw),
+                "kills":    safe(row[1]),
+                "assists":  safe(row[2]),
+                "deaths":   safe(row[3]),
+                "kd":       safe(row[4]),
+                "captures": safe(row[6]),
+                "obj_time": safe(row[7]),
+                "points":   safe(row[9]),
             })
         except: continue
     return players
@@ -879,9 +880,12 @@ async def import_mmr(interaction: discord.Interaction, file: discord.Attachment)
                 per_player[cname].append({
                     "session":      sheet_name,
                     "mmr":          p["mmr"],
-                    "kd":           p["kd"],
                     "kills":        p.get("kills", 0),
+                    "assists":      p.get("assists", 0),
                     "deaths":       p.get("deaths", 0),
+                    "kd":           p["kd"],
+                    "captures":     p.get("captures", 0),
+                    "obj_time":     p.get("obj_time", 0),
                     "points":       p["points"],
                     "session_rank": session_ranks.get(p["name"], "?"),
                     "session_size": session_size,
@@ -910,7 +914,19 @@ async def import_mmr(interaction: discord.Interaction, file: discord.Attachment)
             new_history = existing.get("history", [])
             for s in sessions_list:
                 if s["session"] not in existing_sessions:
-                    new_history.append(s)
+                    new_history.append({
+                        "session":      s["session"],
+                        "mmr":          s["mmr"],
+                        "kills":        s.get("kills", 0),
+                        "assists":      s.get("assists", 0),
+                        "deaths":       s.get("deaths", 0),
+                        "kd":           s.get("kd", 0),
+                        "captures":     s.get("captures", 0),
+                        "obj_time":     s.get("obj_time", 0),
+                        "points":       s.get("points", 0),
+                        "session_rank": s.get("session_rank", "?"),
+                        "session_size": s.get("session_size", "?"),
+                    })
             if lb:
                 overall = lb["mmr"]
                 kd, kills, deaths = lb["kd"], lb.get("kills", 0), lb.get("deaths", 0)
@@ -1257,8 +1273,8 @@ async def admin_error(interaction: discord.Interaction, error):
 # SESSION STATS COMMAND
 # ─────────────────────────────────────────────
 
-@bot.tree.command(name="session", description="Look up a player's stats from a specific session.")
-async def session_lookup(interaction: discord.Interaction, session: str, player: str):
+@bot.tree.command(name="session", description="Look up a player's stats from a specific session number.")
+async def session_lookup(interaction: discord.Interaction, number: int, player: str):
     gmmr = get_guild_mmr(interaction.guild_id)
     match = next((v for k, v in gmmr.items() if k.lower() == player.lower()), None)
     name  = next((k for k in gmmr if k.lower() == player.lower()), player)
@@ -1266,10 +1282,12 @@ async def session_lookup(interaction: discord.Interaction, session: str, player:
         await send_minimal(interaction, f"⚠️ No data found for **{player}**.")
         return
     history = match.get("history", [])
-    entry = next((h for h in history if h["session"].lower() == session.lower()), None)
+    # Match "Session X", "session x", or just the number
+    session_key = f"Session {number}"
+    entry = next((h for h in history if h["session"].lower() == session_key.lower()), None)
     if not entry:
-        sessions_list = ", ".join(f"`{h['session']}`" for h in history) or "none"
-        msg = f"⚠️ **{name}** has no data for session `{session}`.\nAvailable sessions: {sessions_list}"
+        available = ", ".join(f"`{h['session']}`" for h in history) or "none"
+        msg = f"⚠️ **{name}** has no data for Session {number}.\nAvailable: {available}"
         await send_minimal(interaction, msg)
         return
 
