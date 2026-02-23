@@ -1253,6 +1253,362 @@ async def admin_error(interaction: discord.Interaction, error):
 # STARTUP
 # ─────────────────────────────────────────────
 
+# ─────────────────────────────────────────────
+# SESSION STATS COMMAND
+# ─────────────────────────────────────────────
+
+@bot.tree.command(name="session", description="Look up a player's stats from a specific session.")
+async def session_lookup(interaction: discord.Interaction, session: str, player: str):
+    gmmr = get_guild_mmr(interaction.guild_id)
+    match = next((v for k, v in gmmr.items() if k.lower() == player.lower()), None)
+    name  = next((k for k in gmmr if k.lower() == player.lower()), player)
+    if not match:
+        await send_minimal(interaction, f"⚠️ No data found for **{player}**.")
+        return
+    history = match.get("history", [])
+    entry = next((h for h in history if h["session"].lower() == session.lower()), None)
+    if not entry:
+        sessions_list = ", ".join(f"`{h['session']}`" for h in history) or "none"
+        msg = f"⚠️ **{name}** has no data for session `{session}`.\nAvailable sessions: {sessions_list}"
+        await send_minimal(interaction, msg)
+        return
+
+    mmr    = entry["mmr"]
+    s_rank = entry.get("session_rank", "?")
+    s_size = entry.get("session_size", "?")
+    rname, ename = halo_rank(mmr)
+    remoji = get_emoji(interaction.guild, ename)
+
+    # K/D from session history entry
+    kd     = entry.get("kd", "?")
+    kills  = entry.get("kills", "?")
+    deaths = entry.get("deaths", "?")
+    points = entry.get("points", "?")
+    assists_val = entry.get("assists", "?")
+    captures_val = entry.get("captures", "?")
+    try:
+        kda = round((float(kills) + float(assists_val)) / max(float(deaths), 1), 2)
+    except:
+        kda = "?"
+
+    out = "\n".join([
+        f"**{name}** \u2014 {entry['session']}",
+        f"{remoji} *{rname}* | MMR: **{mmr}** | Session Rank: **#{s_rank}/{s_size}**",
+        f"Kills: {kills} | Deaths: {deaths} | K/D: {kd} | KDA: {kda}",
+        f"Assists: {assists_val} | Points: {points} | Captures: {captures_val}",
+    ])
+    await send_minimal(interaction, out, ephemeral=False)
+
+
+# ─────────────────────────────────────────────
+# HALO 3 MATCHMAKING SYSTEM
+# ─────────────────────────────────────────────
+
+# Map pool — all standard + DLC maps with Halopedia thumbnail URLs
+# URL pattern: https://www.halopedia.org/Special:FilePath/H3_Multiplayer_<Name>.jpg
+def h3_img(filename: str) -> str:
+    return f"https://www.halopedia.org/Special:FilePath/{filename}"
+
+HALO3_MAPS = [
+    # Standard maps
+    {"name": "Construct",   "img": h3_img("H3_Multiplayer_Construct.jpg"),   "dlc": False},
+    {"name": "Epitaph",     "img": h3_img("H3_Multiplayer_Epitaph.jpg"),     "dlc": False},
+    {"name": "Guardian",    "img": h3_img("H3_Multiplayer_Guardian.jpg"),    "dlc": False},
+    {"name": "High Ground", "img": h3_img("H3_Multiplayer_High_Ground.jpg"), "dlc": False},
+    {"name": "Isolation",   "img": h3_img("H3_Multiplayer_Isolation.jpg"),   "dlc": False},
+    {"name": "Last Resort", "img": h3_img("H3_Multiplayer_Last_Resort.jpg"), "dlc": False},
+    {"name": "Narrows",     "img": h3_img("H3_Multiplayer_Narrows.jpg"),     "dlc": False},
+    {"name": "Sandtrap",    "img": h3_img("H3_Multiplayer_Sandtrap.jpg"),    "dlc": False},
+    {"name": "Snowbound",   "img": h3_img("H3_Multiplayer_Snowbound.jpg"),   "dlc": False},
+    {"name": "The Pit",     "img": h3_img("H3_Multiplayer_The_Pit.jpg"),     "dlc": False},
+    {"name": "Valhalla",    "img": h3_img("H3_Multiplayer_Valhalla.jpg"),    "dlc": False},
+    # Heroic DLC
+    {"name": "Foundry",     "img": h3_img("H3_Multiplayer_Foundry.jpg"),     "dlc": True},
+    {"name": "Rat's Nest",  "img": h3_img("H3_Multiplayer_Rats_Nest.jpg"),   "dlc": True},
+    {"name": "Standoff",    "img": h3_img("H3_Multiplayer_Standoff.jpg"),    "dlc": True},
+    # Legendary DLC
+    {"name": "Avalanche",   "img": h3_img("H3_Multiplayer_Avalanche.jpg"),   "dlc": True},
+    {"name": "Blackout",    "img": h3_img("H3_Multiplayer_Blackout.jpg"),    "dlc": True},
+    {"name": "Ghost Town",  "img": h3_img("H3_Multiplayer_Ghost_Town.jpg"),  "dlc": True},
+    # Mythic DLC
+    {"name": "Assembly",    "img": h3_img("H3_Multiplayer_Assembly.jpg"),    "dlc": True},
+    {"name": "Citadel",     "img": h3_img("H3_Multiplayer_Citadel.jpg"),     "dlc": True},
+    {"name": "Heretic",     "img": h3_img("H3_Multiplayer_Heretic.jpg"),     "dlc": True},
+    {"name": "Longshore",   "img": h3_img("H3_Multiplayer_Longshore.jpg"),   "dlc": True},
+    {"name": "Orbital",     "img": h3_img("H3_Multiplayer_Orbital.jpg"),     "dlc": True},
+    {"name": "Sandbox",     "img": h3_img("H3_Multiplayer_Sandbox.jpg"),     "dlc": True},
+]
+
+HALO3_GAMETYPES = [
+    "Slayer", "Team Slayer", "Capture the Flag", "Oddball",
+    "King of the Hill", "VIP", "Territories", "Assault", "Infection",
+]
+
+
+class MatchmakingMenuView(discord.ui.View):
+    """Opening menu — choose mode."""
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(label="🎲 Single Match", style=discord.ButtonStyle.primary, row=0)
+    async def single_match(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "🎲 **Single Match — Choose your settings**",
+            view=SingleMatchSetupView(),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="🎲🎲 Two Matches", style=discord.ButtonStyle.primary, row=0)
+    async def two_matches(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "🎲 **Two Matches — Choose your settings**",
+            view=TwoMatchSetupView(),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="✕ Cancel", style=discord.ButtonStyle.secondary, row=0)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.delete_original_response()
+
+
+class TeamCountSelect(discord.ui.Select):
+    def __init__(self, row=0):
+        self.selected_count = 2
+        options = [
+            discord.SelectOption(label=f"{i} Teams", value=str(i), default=(i == 2))
+            for i in range(2, 9)
+        ]
+        super().__init__(placeholder="Number of teams...", options=options, row=row)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.selected_count = int(self.values[0])
+        await interaction.response.defer()
+
+
+class MapPoolSelect(discord.ui.Select):
+    def __init__(self, row=1):
+        self.include_dlc = False
+        options = [
+            discord.SelectOption(label="Standard maps only", value="standard", default=True),
+            discord.SelectOption(label="Standard + all DLC", value="all"),
+        ]
+        super().__init__(placeholder="Map pool...", options=options, row=row)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.include_dlc = self.values[0] == "all"
+        await interaction.response.defer()
+
+
+class SingleMatchSetupView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.team_select = TeamCountSelect(row=0)
+        self.map_select  = MapPoolSelect(row=1)
+        self.add_item(self.team_select)
+        self.add_item(self.map_select)
+
+    @discord.ui.button(label="🎲 Roll!", style=discord.ButtonStyle.success, row=2)
+    async def roll(self, interaction: discord.Interaction, button: discord.ui.Button):
+        maps = [m for m in HALO3_MAPS if not m["dlc"] or self.map_select.include_dlc]
+        chosen_map      = random.choice(maps)
+        chosen_gametype = random.choice(HALO3_GAMETYPES)
+        num_teams       = self.team_select.selected_count
+
+        embed = discord.Embed(
+            title="🎮 Halo 3 — Match Roll",
+            color=0x00aaff
+        )
+        embed.add_field(name="🗺️ Map",      value=f"**{chosen_map['name']}**", inline=True)
+        embed.add_field(name="🎯 Game Type", value=f"**{chosen_gametype}**",   inline=True)
+        embed.add_field(name="👥 Teams",     value=f"**{num_teams}**",          inline=True)
+        embed.set_image(url=chosen_map["img"])
+        embed.set_footer(text="Halo Night Bot — Matchmaking")
+
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+
+
+class TwoMatchSetupView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.team_select = TeamCountSelect(row=0)
+        self.map_select  = MapPoolSelect(row=1)
+        self.add_item(self.team_select)
+        self.add_item(self.map_select)
+
+    @discord.ui.button(label="🎲 Roll Both Matches!", style=discord.ButtonStyle.success, row=2)
+    async def roll(self, interaction: discord.Interaction, button: discord.ui.Button):
+        maps  = [m for m in HALO3_MAPS if not m["dlc"] or self.map_select.include_dlc]
+        sample = random.sample(maps, min(2, len(maps)))
+        m1, m2 = sample[0], sample[1]
+        g1     = random.choice(HALO3_GAMETYPES)
+        g2     = random.choice(HALO3_GAMETYPES)
+        num_teams = self.team_select.selected_count
+
+        embed1 = discord.Embed(title="🎮 Match 1", color=0x00aaff)
+        embed1.add_field(name="🗺️ Map",      value=f"**{m1['name']}**", inline=True)
+        embed1.add_field(name="🎯 Game Type", value=f"**{g1}**",         inline=True)
+        embed1.add_field(name="👥 Teams",     value=f"**{num_teams}**",   inline=True)
+        embed1.set_image(url=m1["img"])
+
+        embed2 = discord.Embed(title="🎮 Match 2", color=0xff6600)
+        embed2.add_field(name="🗺️ Map",      value=f"**{m2['name']}**", inline=True)
+        embed2.add_field(name="🎯 Game Type", value=f"**{g2}**",         inline=True)
+        embed2.add_field(name="👥 Teams",     value=f"**{num_teams}**",   inline=True)
+        embed2.set_image(url=m2["img"])
+
+        # Show veto view for both matches
+        await interaction.response.send_message(
+            "⚔️ **Two matches rolled! Each team can veto one option below.**",
+            embeds=[embed1, embed2],
+            view=VetoView(m1, g1, m2, g2, num_teams, maps),
+            ephemeral=False
+        )
+
+
+class VetoView(discord.ui.View):
+    """Veto system: each match has a Map veto and a Gametype veto button.
+       When vetoed, that slot is rerolled once. Buttons disable after use."""
+
+    def __init__(self, m1, g1, m2, g2, num_teams, maps):
+        super().__init__(timeout=300)
+        self.m1, self.g1 = m1, g1
+        self.m2, self.g2 = m2, g2
+        self.num_teams   = num_teams
+        self.maps        = maps
+        self.vetoed      = set()  # track what's been vetoed
+
+    def _build_embeds(self):
+        e1 = discord.Embed(title="🎮 Match 1", color=0x00aaff)
+        e1.add_field(name="🗺️ Map",      value=f"**{self.m1['name']}**", inline=True)
+        e1.add_field(name="🎯 Game Type", value=f"**{self.g1}**",         inline=True)
+        e1.add_field(name="👥 Teams",     value=f"**{self.num_teams}**",   inline=True)
+        e1.set_image(url=self.m1["img"])
+
+        e2 = discord.Embed(title="🎮 Match 2", color=0xff6600)
+        e2.add_field(name="🗺️ Map",      value=f"**{self.m2['name']}**", inline=True)
+        e2.add_field(name="🎯 Game Type", value=f"**{self.g2}**",         inline=True)
+        e2.add_field(name="👥 Teams",     value=f"**{self.num_teams}**",   inline=True)
+        e2.set_image(url=self.m2["img"])
+        return [e1, e2]
+
+    @discord.ui.button(label="🚫 Veto Match 1 Map", style=discord.ButtonStyle.danger, row=0)
+    async def veto_m1_map(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if "m1_map" in self.vetoed:
+            await interaction.response.send_message("⚠️ Match 1 map already vetoed.", ephemeral=True); return
+        self.vetoed.add("m1_map")
+        old = self.m1["name"]
+        pool = [m for m in self.maps if m["name"] != self.m1["name"] and m["name"] != self.m2["name"]]
+        self.m1 = random.choice(pool) if pool else self.m1
+        button.disabled = True
+        button.label    = f"✅ M1 Map Vetoed"
+        await interaction.response.edit_message(
+            content=f"🚫 **{interaction.user.display_name}** vetoed **{old}** → rerolled to **{self.m1['name']}**",
+            embeds=self._build_embeds(), view=self)
+
+    @discord.ui.button(label="🚫 Veto Match 1 Type", style=discord.ButtonStyle.danger, row=0)
+    async def veto_m1_type(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if "m1_type" in self.vetoed:
+            await interaction.response.send_message("⚠️ Match 1 gametype already vetoed.", ephemeral=True); return
+        self.vetoed.add("m1_type")
+        old = self.g1
+        pool = [g for g in HALO3_GAMETYPES if g != self.g1]
+        self.g1 = random.choice(pool) if pool else self.g1
+        button.disabled = True
+        button.label    = "✅ M1 Type Vetoed"
+        await interaction.response.edit_message(
+            content=f"🚫 **{interaction.user.display_name}** vetoed **{old}** → rerolled to **{self.g1}**",
+            embeds=self._build_embeds(), view=self)
+
+    @discord.ui.button(label="🚫 Veto Match 2 Map", style=discord.ButtonStyle.danger, row=1)
+    async def veto_m2_map(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if "m2_map" in self.vetoed:
+            await interaction.response.send_message("⚠️ Match 2 map already vetoed.", ephemeral=True); return
+        self.vetoed.add("m2_map")
+        old = self.m2["name"]
+        pool = [m for m in self.maps if m["name"] != self.m1["name"] and m["name"] != self.m2["name"]]
+        self.m2 = random.choice(pool) if pool else self.m2
+        button.disabled = True
+        button.label    = "✅ M2 Map Vetoed"
+        await interaction.response.edit_message(
+            content=f"🚫 **{interaction.user.display_name}** vetoed **{old}** → rerolled to **{self.m2['name']}**",
+            embeds=self._build_embeds(), view=self)
+
+    @discord.ui.button(label="🚫 Veto Match 2 Type", style=discord.ButtonStyle.danger, row=1)
+    async def veto_m2_type(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if "m2_type" in self.vetoed:
+            await interaction.response.send_message("⚠️ Match 2 gametype already vetoed.", ephemeral=True); return
+        self.vetoed.add("m2_type")
+        old = self.g2
+        pool = [g for g in HALO3_GAMETYPES if g != self.g2]
+        self.g2 = random.choice(pool) if pool else self.g2
+        button.disabled = True
+        button.label    = "✅ M2 Type Vetoed"
+        await interaction.response.edit_message(
+            content=f"🚫 **{interaction.user.display_name}** vetoed **{old}** → rerolled to **{self.g2}**",
+            embeds=self._build_embeds(), view=self)
+
+    @discord.ui.button(label="✅ Lock In", style=discord.ButtonStyle.success, row=2)
+    async def lock_in(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="🔒 **Matches locked in! Good luck!**",
+            embeds=self._build_embeds(), view=self)
+
+
+@bot.tree.command(name="matchmaking", description="Roll Halo 3 maps, game types and teams for your night.")
+async def matchmaking(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "🎮 **Halo 3 Matchmaking**\nChoose a mode to get started:",
+        view=MatchmakingMenuView(),
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="help", description="List all available commands.")
+async def help_command(interaction: discord.Interaction):
+    is_admin_user = interaction.user.guild_permissions.administrator
+
+    everyone_commands = [
+        ("`/rank`",            "Check your own current rank, MMR and stats."),
+        ("`/mmr [player]`",    "Full stats, rank history and session breakdown for any player."),
+        ("`/leaderboard`",     "Full MMR leaderboard grouped by rank."),
+        ("`/compare [p1] [p2]`","Side by side stat comparison between two players with winners highlighted."),
+        ("`/rivals [p1] [p2]`","Head-to-head session history and win tally between two players."),
+        ("`/stats`",           "Top performer in every stat category — MMR, K/D, Kills, Obj Time and more."),
+        ("`/session [s] [p]`", "Stats for a specific player in a specific session e.g. `Session 1`."),
+        ("`/matchmaking`",     "Roll Halo 3 maps, game types and teams — single or double match with veto system."),
+    ]
+
+    admin_commands = [
+        ("`/teams`",           "Open the Team Builder — assign, randomise, balance and send teams."),
+        ("`/sub [out] [in]`",  "Swap two players between active teams."),
+        ("`/recall`",          "Move all voice members back to their mapped lobby channels."),
+        ("`/set_lobby`",       "Map voice channels to lobby destinations for `/recall`."),
+        ("`/import_mmr`",      "Upload a session Excel file to update all player MMR and history."),
+        ("`/export`",          "Download the current MMR data as a JSON file backup."),
+        ("`/presets`",         "View and load saved team lineup presets."),
+        ("`/history`",         "Browse the last 10 team configurations."),
+        ("`/sync`",            "Force re-sync slash commands if any are missing."),
+    ]
+
+    lines = ["📖 **Halo Night Bot — Command List**\n"]
+
+    lines.append("**Everyone**")
+    for cmd, desc in everyone_commands:
+        lines.append(f"> {cmd} — {desc}")
+
+    if is_admin_user:
+        lines.append("\n**Admin Only**")
+        for cmd, desc in admin_commands:
+            lines.append(f"> {cmd} — {desc}")
+    else:
+        lines.append("\n_Admin commands are hidden. Ask a server admin for help with team management._")
+
+    await send_minimal(interaction, "\n".join(lines), ephemeral=True)
+
+
 @bot.tree.command(name="sync", description="[Admin] Force sync slash commands if they are missing.")
 @is_admin()
 async def sync_commands(interaction: discord.Interaction):
