@@ -24,6 +24,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 MMR_FILE          = "mmr_data.json"
 PRESETS_FILE      = "presets.json"
 TEAM_HISTORY_FILE = "team_history.json"
+RECALL_FILE       = "recall_channels.json"
 STATS_FILE        = "Collection_of_Stats_across_Halo_Nights.xlsx"
 PROVISIONAL_SESSIONS = 3
 
@@ -42,10 +43,11 @@ def save_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
 
-mmr_data:     dict = load_json(MMR_FILE)
-presets:      dict = load_json(PRESETS_FILE)
-team_history: dict = load_json(TEAM_HISTORY_FILE)
-team_storage: dict = {}
+mmr_data:        dict = load_json(MMR_FILE)
+presets:         dict = load_json(PRESETS_FILE)
+team_history:    dict = load_json(TEAM_HISTORY_FILE)
+recall_channels: dict = load_json(RECALL_FILE)
+team_storage:    dict = {}
 
 def is_admin():
     async def predicate(interaction: discord.Interaction):
@@ -548,7 +550,7 @@ class TeamPresetsView(discord.ui.View):
             self.preset_select = TeamPresetSelect(gp)
             self.add_item(self.preset_select)
 
-    @discord.ui.button(label="📂 Load Preset", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="📂 Presets", style=discord.ButtonStyle.success, row=1)
     async def load_preset(self, interaction: discord.Interaction, button: discord.ui.Button):
         preset_name = self.preset_select.selected_name
         if not preset_name:
@@ -643,22 +645,25 @@ class TeamHistorySelect(discord.ui.Select):
 # RECALL PICKER (used inside Team Builder)
 # ─────────────────────────────────────────────
 class RecallPickerView(discord.ui.View):
+    """Used from team builder 🔁 button. Uses saved lobby if set, else shows picker."""
     def __init__(self, guild):
         super().__init__(timeout=TIMEOUT_MENU)
         self.guild = guild
-        options = [discord.SelectOption(label=c.name, value=str(c.id))
-                   for c in guild.voice_channels[:25]]
-        self.select = discord.ui.Select(
-            placeholder="Pick the lobby channel...", options=options, row=0)
-        self.select.callback = self.on_select
-        self.add_item(self.select)
+        saved_id = recall_channels.get(str(guild.id))
+        self.saved_lobby = guild.get_channel(saved_id) if saved_id else None
 
-    async def on_select(self, interaction: discord.Interaction):
-        lobby = self.guild.get_channel(int(self.select.values[0]))
-        if not lobby:
-            await interaction.response.edit_message(
-                content="⚠️ Channel not found.", view=self)
-            return
+        if not self.saved_lobby:
+            options = [discord.SelectOption(label=c.name, value=str(c.id))
+                       for c in guild.voice_channels[:25]]
+            self.select = discord.ui.Select(
+                placeholder="Pick the lobby channel...", options=options, row=0)
+            self.select.callback = self.on_select
+            self.add_item(self.select)
+
+    async def do_recall(self, interaction: discord.Interaction, lobby: discord.VoiceChannel):
+        # Save as new default
+        recall_channels[str(self.guild.id)] = lobby.id
+        save_json(RECALL_FILE, recall_channels)
         moved = 0
         for vc in self.guild.voice_channels:
             if vc.id == lobby.id:
@@ -669,6 +674,19 @@ class RecallPickerView(discord.ui.View):
                     moved += 1
         await interaction.response.edit_message(
             content=f"✅ Recalled **{moved}** member(s) to **{lobby.name}**.", view=None)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self.saved_lobby:
+            await self.do_recall(interaction, self.saved_lobby)
+            return False
+        return True
+
+    async def on_select(self, interaction: discord.Interaction):
+        lobby = self.guild.get_channel(int(self.select.values[0]))
+        if not lobby:
+            await interaction.response.edit_message(content="⚠️ Channel not found.", view=self)
+            return
+        await self.do_recall(interaction, lobby)
 
 # ─────────────────────────────────────────────
 # TEAM BUILDER
@@ -686,18 +704,23 @@ class TeamBuilderView(discord.ui.View):
         self.add_item(self.channel_select)
 
     def _builder_content(self, status: str = "") -> str:
+        saved_id = recall_channels.get(str(self.guild.id))
+        saved    = self.guild.get_channel(saved_id) if saved_id else None
+        lobby    = f"**{saved.name}**" if saved else "_not set — use /recall to configure_"
         base = (
             "👥 **Team Builder**\n"
-            "1️⃣ Pick members → 2️⃣ Pick channel → ➕ Assign → Repeat → 🚀 Send!\n"
-            "🎲 Randomise or ⚖️ Balanced for automatic generation\n"
-            "💾 Save Preset to store a lineup | 📂 Load Preset to restore one\n"
-            "Use 🔁 to recall everyone back between rounds."
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "**Assign manually:** pick members → pick channel → ➕\n"
+            "**Auto teams:** 🎲 Randomise  |  ⚖️ Balanced by MMR\n"
+            "**Presets:** 💾 Save current  |  📂 Load saved\n"
+            f"**Lobby:** {lobby}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━"
         )
         if status:
             base += f"\n\n{status}"
         return base
 
-    @discord.ui.button(label="➕ Assign to Team", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="➕ Assign", style=discord.ButtonStyle.primary, row=2)
     async def assign(self, interaction: discord.Interaction, button: discord.ui.Button):
         gid    = self.guild.id
         chosen = self.member_select.selected_members
@@ -735,7 +758,7 @@ class TeamBuilderView(discord.ui.View):
         await interaction.response.edit_message(
             content=self._builder_content(status), view=self)
 
-    @discord.ui.button(label="🚀 Send Teams", style=discord.ButtonStyle.success, row=2)
+    @discord.ui.button(label="🚀 Send", style=discord.ButtonStyle.success, row=2)
     async def send_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         gid   = self.guild.id
         teams = team_storage.get(gid, {})
@@ -766,29 +789,29 @@ class TeamBuilderView(discord.ui.View):
             "🚀 **Teams dispatched!**\n" + "\n".join(results),
             view=DismissView(), ephemeral=False)
 
-    @discord.ui.button(label="📋 Show Teams", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="📋 Teams", style=discord.ButtonStyle.secondary, row=2)
     async def show_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         summary = build_team_summary(self.guild, self.guild.id)
         await interaction.response.edit_message(
             content=self._builder_content(summary), view=self)
 
-    @discord.ui.button(label="🎲 Randomise Teams", style=discord.ButtonStyle.primary, row=3)
+    @discord.ui.button(label="🎲 Randomise", style=discord.ButtonStyle.primary, row=3)
     async def randomise_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             "🎲 **Randomise Teams** — Pick channels:",
             view=RandomiseView(self.guild), ephemeral=True)
 
-    @discord.ui.button(label="⚖️ Balanced Teams", style=discord.ButtonStyle.primary, row=3)
+    @discord.ui.button(label="⚖️ Balanced", style=discord.ButtonStyle.primary, row=3)
     async def balanced_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             "⚖️ **MMR Balanced Teams** — Pick channels:",
             view=MatchmakeView(self.guild), ephemeral=True)
 
-    @discord.ui.button(label="💾 Save Preset", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="💾 Save", style=discord.ButtonStyle.secondary, row=3)
     async def save_preset(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SavePresetModal(self.guild))
 
-    @discord.ui.button(label="📂 Load Preset", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="📂 Presets", style=discord.ButtonStyle.secondary, row=3)
     async def load_preset(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not presets.get(str(self.guild.id)):
             await interaction.response.send_message(
@@ -798,7 +821,7 @@ class TeamBuilderView(discord.ui.View):
             "📂 **Load Preset** — select one:",
             view=TeamPresetsView(self.guild), ephemeral=True)
 
-    @discord.ui.button(label="🗑️ Clear Teams", style=discord.ButtonStyle.danger, row=4)
+    @discord.ui.button(label="🗑️ Clear", style=discord.ButtonStyle.danger, row=4)
     async def clear_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         team_storage.pop(self.guild.id, None)
         await interaction.response.edit_message(
@@ -806,9 +829,10 @@ class TeamBuilderView(discord.ui.View):
 
     @discord.ui.button(label="🔁 Recall All to Lobby", style=discord.ButtonStyle.secondary, row=4)
     async def recall_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "🔁 **Recall** — pick the lobby channel:",
-            view=RecallPickerView(self.guild), ephemeral=True)
+        saved_id = recall_channels.get(str(self.guild.id))
+        saved    = self.guild.get_channel(saved_id) if saved_id else None
+        label    = f"🔁 Recall to **{saved.name}**?" if saved else "🔁 **Recall** — pick a lobby channel:"
+        await interaction.response.send_message(label, view=RecallPickerView(self.guild), ephemeral=True)
 
     @discord.ui.button(label="📜 History", style=discord.ButtonStyle.secondary, row=4)
     async def history_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1071,9 +1095,12 @@ class VetoView(discord.ui.View):
 # ─────────────────────────────────────────────
 
 @bot.tree.command(name="recall",
-    description="[Admin] Move all voice members to a chosen lobby channel.")
+    description="[Admin] Set the lobby channel and recall all members to it.")
 @is_admin()
 async def recall(interaction: discord.Interaction, lobby: discord.VoiceChannel):
+    gid = str(interaction.guild_id)
+    recall_channels[gid] = lobby.id
+    save_json(RECALL_FILE, recall_channels)
     await interaction.response.defer()
     moved = 0
     for vc in interaction.guild.voice_channels:
@@ -1084,7 +1111,7 @@ async def recall(interaction: discord.Interaction, lobby: discord.VoiceChannel):
                 await member.move_to(lobby)
                 moved += 1
     await interaction.followup.send(
-        f"✅ Recalled **{moved}** member(s) to **{lobby.name}**.",
+        f"✅ **{lobby.name}** set as lobby. Recalled **{moved}** member(s).",
         view=DismissView(), ephemeral=False)
 
 
@@ -1096,13 +1123,9 @@ async def teams(interaction: discord.Interaction):
         await interaction.response.send_message(
             "⚠️ No voice channels found.", ephemeral=True)
         return
+    view = TeamBuilderView(interaction.guild)
     await interaction.response.send_message(
-        "👥 **Team Builder**\n"
-        "1️⃣ Pick members → 2️⃣ Pick channel → ➕ Assign → Repeat → 🚀 Send!\n"
-        "🎲 Randomise or ⚖️ Balanced for automatic generation\n"
-        "💾 Save Preset to store a lineup | 📂 Load Preset to restore one\n"
-        "Use 🔁 to recall everyone back between rounds.",
-        view=TeamBuilderView(interaction.guild), ephemeral=True)
+        view._builder_content(), view=view, ephemeral=True)
 
 
 @bot.tree.command(name="sub",
@@ -1722,7 +1745,13 @@ async def podium(interaction: discord.Interaction):
 @bot.tree.command(name="help", description="List all available commands.")
 async def help_command(interaction: discord.Interaction):
     is_admin_user = interaction.user.guild_permissions.administrator
-    all_cmds      = sorted(bot.tree.get_commands(), key=lambda c: c.name)
+    # get_commands() alone only returns global commands registered before sync.
+    # Fetch from the guild tree which is always populated after on_ready sync.
+    guild_obj = interaction.guild
+    all_cmds  = sorted(
+        bot.tree.get_commands(guild=guild_obj) or bot.tree.get_commands(),
+        key=lambda c: c.name
+    )
     admin_cmds, everyone_cmds = [], []
     for cmd in all_cmds:
         if cmd.name == "help":
