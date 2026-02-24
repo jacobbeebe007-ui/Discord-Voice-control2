@@ -161,8 +161,10 @@ def parse_leaderboard_sheet(ws) -> list:
             name = str(row[1]).strip() if row[1] else None
             if not name or name.lower() == "none":
                 continue
+            gamertag = str(row[2]).strip() if row[2] and str(row[2]).strip().lower() != "none" else ""
             players.append({
                 "name":     name,
+                "gamertag": gamertag,
                 "kills":    float(row[3] or 0),
                 "assists":  float(row[4] or 0),
                 "deaths":   float(row[5] or 0),
@@ -1252,10 +1254,12 @@ async def import_mmr(interaction: discord.Interaction,
                 session_count = len(sessions_list)
             else:
                 continue
+            gamertag = lb.get("gamertag", "") if lb else ""
             mmr_data[gid][cname] = {
                 "mmr": overall, "kd": kd, "kills": kills, "deaths": deaths,
                 "points": points, "obj_time": obj_time, "assists": assists,
-                "captures": captures, "sessions": session_count, "history": new_history,
+                "captures": captures, "sessions": session_count,
+                "gamertag": gamertag, "history": new_history,
             }
             imported.append((cname, overall, session_count))
 
@@ -1295,8 +1299,10 @@ async def leaderboard(interaction: discord.Interaction):
         mmr      = data.get("mmr", 0)
         sessions = data.get("sessions", 0)
         rname, ename = halo_rank(mmr)
-        prov  = "*" if sessions < PROVISIONAL_SESSIONS else ""
-        entry = f"  `#{pos}` **{name}**{prov} — {mmr} MMR"
+        prov     = "*" if sessions < PROVISIONAL_SESSIONS else ""
+        gamertag = data.get("gamertag", "")
+        gt_part  = f" {gamertag}" if gamertag else ""
+        entry    = f"  `#{pos}` **{name}**{prov}{gt_part} — {mmr} MMR"
         if rname not in rank_groups:
             rank_groups[rname] = {"ename": ename, "entries": []}
         rank_groups[rname]["entries"].append(entry)
