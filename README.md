@@ -123,7 +123,7 @@ The bot uses custom server emojis for the 22 Halo Reach ranks. Upload the follow
 
 | Command | Description |
 |---|---|
-| `/teams` | Open the Team Builder — assign, randomise, balance and send teams |
+| `/teams` | Team Builder — stage members (Discord user picker, voice/online/offline lists, or **+All in voice**), pick a channel, **Assign**; **More** for history/recall/clear |
 | `/sub [player_out] [player_in]` | Swap two players between active teams |
 | `/recall` | Move all voice members back to their mapped lobby channels |
 | `/set_lobby` | Map voice channels to lobby destinations for `/recall` |
