@@ -243,9 +243,9 @@ def find_member_team(guild_id: int, member_id: int):
 def build_team_summary(guild: discord.Guild, guild_id: int) -> str:
     teams = team_storage.get(guild_id, {})
     if not teams:
-        return "No teams assigned yet."
+        return "_No teams assigned yet._"
     gmmr  = get_guild_mmr(guild_id)
-    lines = []
+    lines = ["**Current assignments**"]
     for vc_id, member_ids in teams.items():
         vc = guild.get_channel(int(vc_id))
         names, mmr_vals = [], []
@@ -260,9 +260,55 @@ def build_team_summary(guild: discord.Guild, guild_id: int) -> str:
                 mmr_vals.append(pdata["mmr"])
             else:
                 names.append(dname)
-        avg  = f" | avg MMR: {round(sum(mmr_vals)/len(mmr_vals), 1)}" if mmr_vals else ""
-        lines.append(f"**{vc.name if vc else vc_id}** ({len(names)}){avg}\n> {', '.join(names)}")
+        avg  = f" · avg **{round(sum(mmr_vals)/len(mmr_vals), 1)}** MMR" if mmr_vals else ""
+        lines.append(f"**{vc.name if vc else vc_id}** · {len(names)} players{avg}\n└ {', '.join(names)}")
     return "\n".join(lines)
+
+
+def team_builder_member_buckets(guild: discord.Guild):
+    """Split non-bot members: in voice, online (not in voice), offline/invisible."""
+    in_voice = {}
+    for vc in guild.voice_channels:
+        for m in vc.members:
+            if not m.bot:
+                in_voice[m.id] = m
+    in_ids = set(in_voice.keys())
+    online_nv, offline = [], []
+    for m in guild.members:
+        if m.bot or m.id in in_ids:
+            continue
+        if m.status in (discord.Status.online, discord.Status.idle, discord.Status.dnd):
+            online_nv.append(m)
+        else:
+            offline.append(m)
+    sk = lambda m: m.display_name.lower()
+    voice_sorted = sorted(in_voice.values(), key=sk)
+    online_sorted = sorted(online_nv, key=sk)
+    off_sorted = sorted(offline, key=sk)
+    return (
+        voice_sorted[:25],
+        online_sorted[:25],
+        off_sorted[:25],
+        len(voice_sorted),
+        len(online_sorted),
+        len(off_sorted),
+    )
+
+
+def _select_options_from_members(members: list, desc_prefix: str) -> list:
+    opts = []
+    for m in members:
+        label = m.display_name[:80]
+        if len(m.display_name) > 80:
+            label = m.display_name[:77] + "…"
+        opts.append(
+            discord.SelectOption(
+                label=label,
+                value=str(m.id),
+                description=f"{desc_prefix} · {m.status.name}",
+            )
+        )
+    return opts
 
 
 def save_team_to_history(guild_id: int, guild: discord.Guild, label: str = None):
