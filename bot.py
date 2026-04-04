@@ -722,54 +722,283 @@ class RecallPickerView(discord.ui.View):
 # ─────────────────────────────────────────────
 # TEAM BUILDER
 # ─────────────────────────────────────────────
+class TeamChannelSelect(discord.ui.Select):
+    def __init__(self, vcs, row: int = 0):
+        self.selected_vc_id = None
+        options = [discord.SelectOption(label=c.name, value=str(c.id)) for c in vcs[:25]]
+        super().__init__(
+            placeholder="1️⃣ Team voice channel…",
+            options=options or [discord.SelectOption(label="No channels", value="none")],
+            min_values=1,
+            max_values=1,
+            row=row,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values == ["none"]:
+            await interaction.response.defer()
+            return
+        self.selected_vc_id = self.values[0]
+        vc = interaction.guild.get_channel(int(self.selected_vc_id))
+        builder = self.view
+        await interaction.response.edit_message(
+            content=builder._builder_content(
+                f"✅ Target channel: **{vc.name if vc else '?'}** — add people, then **➕ Assign**."
+            ),
+            view=builder,
+        )
+
+
+class StagingUserSelect(discord.ui.UserSelect):
+    """Native Discord multiselect — add up to 25 members per pick (accumulates)."""
+
+    def __init__(self, row: int = 1):
+        super().__init__(
+            placeholder="2️⃣ Add members (picker, up to 25 at once)…",
+            min_values=1,
+            max_values=25,
+            row=row,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        builder: TeamBuilderView = self.view
+        n = 0
+        for m in self.values:
+            if isinstance(m, discord.Member) and not m.bot:
+                builder.staged_member_ids.add(m.id)
+                n += 1
+        await interaction.response.edit_message(
+            content=builder._builder_content(
+                f"✅ Added **{n}** from picker · **{len(builder.staged_member_ids)}** total staged."
+            ),
+            view=builder,
+        )
+
+
+class MemberCategoryPickView(discord.ui.View):
+    """Multiselect from in-voice / online / offline buckets (max 25 each list)."""
+
+    def __init__(self, builder: "TeamBuilderView"):
+        super().__init__(timeout=TIMEOUT_MENU)
+        self.builder = builder
+        self.guild = builder.guild
+        voice, online, off, tv, to, tf = team_builder_member_buckets(self.guild)
+        self._totals = (tv, to, tf)
+        row = 0
+        if voice:
+            self.add_item(self._make_cat_select("🎙️ In voice", voice, "voice", row))
+            row += 1
+        if online:
+            self.add_item(self._make_cat_select(
+                "🟢 Online (not in voice)", online, "online", row))
+            row += 1
+        if off:
+            self.add_item(self._make_cat_select("⚫ Offline / invisible", off, "away", row))
+            row += 1
+
+    def _make_cat_select(self, placeholder, members, desc_pfx, row):
+        opts = _select_options_from_members(members, desc_pfx)
+        mx = min(len(opts), 25)
+
+        class CatSel(discord.ui.Select):
+            def __init__(inner_self):
+                super().__init__(
+                    placeholder=placeholder[:150],
+                    options=opts,
+                    min_values=0,
+                    max_values=mx,
+                    row=row,
+                )
+
+            async def callback(inner_self, interaction: discord.Interaction):
+                await interaction.response.defer()
+
+        return CatSel()
+
+    def _header(self) -> str:
+        tv, to, tf = self._totals
+        parts = [
+            "### 📂 Pick from lists",
+            "Each menu is **multi-select** (0–25 per list). Then tap **✅ Add to staging**.",
+            f"· 🎙️ In voice — **up to 25** shown of **{tv}** total",
+            f"· 🟢 Online, not in voice — **up to 25** of **{to}**",
+            f"· ⚫ Offline / invisible — **up to 25** of **{tf}**",
+        ]
+        if tv == 0 and to == 0 and tf == 0:
+            parts.append("\n_No non-bot members found._")
+        return "\n".join(parts)
+
+    @discord.ui.button(label="✅ Add to staging", style=discord.ButtonStyle.success, row=3)
+    async def apply_picks(self, interaction: discord.Interaction, button: discord.ui.Button):
+        merged = set()
+        for child in self.children:
+            if isinstance(child, discord.ui.Select):
+                merged |= {int(x) for x in child.values}
+        if not merged:
+            await interaction.response.send_message(
+                "⚠️ Select at least one member in the lists, or use **✕ Close**.",
+                ephemeral=True,
+            )
+            return
+        before = len(self.builder.staged_member_ids)
+        self.builder.staged_member_ids.update(merged)
+        added = len(self.builder.staged_member_ids) - before
+        await self.builder.sync_main_panel()
+        await interaction.response.edit_message(
+            content=f"✅ Staged **{added}** more (**{len(self.builder.staged_member_ids)}** total on main panel).",
+            view=None,
+        )
+
+    @discord.ui.button(label="✕ Close", style=discord.ButtonStyle.secondary, row=3)
+    async def close_pick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Closed.", view=None)
+
+
+class TeamBuilderToolsView(discord.ui.View):
+    """History / recall / clear-all without crowding the main panel."""
+
+    def __init__(self, builder: "TeamBuilderView"):
+        super().__init__(timeout=TIMEOUT_MENU)
+        self.builder = builder
+
+    @discord.ui.button(label="🗑️ Clear all team slots", style=discord.ButtonStyle.danger, row=0)
+    async def clear_all_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
+        team_storage.pop(self.builder.guild.id, None)
+        await self.builder.sync_main_panel(self.builder._builder_content("✅ All team slots cleared."))
+        await interaction.response.edit_message(
+            content="Cleared every team on the main panel.", view=None)
+
+    @discord.ui.button(label="📜 Team history", style=discord.ButtonStyle.primary, row=0)
+    async def open_history(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gid = str(self.builder.guild.id)
+        if not team_history.get(gid):
+            await interaction.response.send_message("⚠️ No team history yet.", ephemeral=True)
+            return
+        await interaction.response.edit_message(content="Sent history in a follow-up ⬇️", view=None)
+        await interaction.followup.send(
+            "📜 **Team History** — select an entry:",
+            view=TeamHistoryView(self.builder.guild),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="🔁 Recall to lobby", style=discord.ButtonStyle.secondary, row=0)
+    async def open_recall(self, interaction: discord.Interaction, button: discord.ui.Button):
+        saved_id = recall_channels.get(str(self.builder.guild.id))
+        saved = self.builder.guild.get_channel(saved_id) if saved_id else None
+        msg = (
+            f"🔁 **Recall** — lobby is **{saved.name}**"
+            if saved
+            else "🔁 **Recall** — pick a lobby channel:"
+        )
+        await interaction.response.edit_message(content="Sent recall picker ⬇️", view=None)
+        await interaction.followup.send(msg, view=RecallPickerView(self.builder.guild), ephemeral=True)
+
+
 class TeamBuilderView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
-        super().__init__(timeout=None)  # Team builder stays until dismissed
+        super().__init__(timeout=None)
         self.guild = guild
-        all_members = list({m.id: m for vc in guild.voice_channels
-                            for m in vc.members}.values())
+        self.message: discord.WebhookMessage | discord.Message | None = None
+        self.staged_member_ids: set = set()
         vcs = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
-        self.member_select  = TeamMemberSelect(all_members)
-        self.channel_select = TeamChannelSelect(vcs)
-        self.add_item(self.member_select)
+        self.channel_select = TeamChannelSelect(vcs, row=0)
+        self.user_select = StagingUserSelect(row=1)
         self.add_item(self.channel_select)
+        self.add_item(self.user_select)
+
+    async def sync_main_panel(self, content: str = None):
+        text = content if content is not None else self._builder_content()
+        if self.message:
+            await self.message.edit(content=text, view=self)
+
+    def _staged_line(self) -> str:
+        if not self.staged_member_ids:
+            return "_**Staged:** none — use the member picker or **📂 From lists**._"
+        names = []
+        for mid in sorted(self.staged_member_ids):
+            m = self.guild.get_member(mid)
+            names.append(m.display_name if m else str(mid))
+        preview = ", ".join(names[:10])
+        if len(names) > 10:
+            preview += f" … *+{len(names) - 10} more*"
+        return f"**Staged ({len(names)}):** {preview}"
 
     def _builder_content(self, status: str = "") -> str:
         saved_id = recall_channels.get(str(self.guild.id))
-        saved    = self.guild.get_channel(saved_id) if saved_id else None
-        lobby    = f"**{saved.name}**" if saved else "_not set — use /recall to configure_"
+        saved = self.guild.get_channel(saved_id) if saved_id else None
+        lobby = f"**{saved.name}**" if saved else "_not set — `/recall`_"
+        ch = self.channel_select.selected_vc_id
+        ch_name = "_pick above ↑_"
+        if ch:
+            vc = self.guild.get_channel(int(ch))
+            ch_name = f"**{vc.name}**" if vc else str(ch)
         base = (
-            "👥 **Team Builder**\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "**Assign manually:** pick members → pick channel → ➕\n"
-            "**Auto teams:** 🎲 Randomise  |  ⚖️ Balanced by MMR\n"
-            "**Presets:** 💾 Save current  |  📂 Load saved\n"
+            "## 👥 Team Builder\n"
+            f"{self._staged_line()}\n"
+            f"**Target channel:** {ch_name}\n"
+            "—\n"
+            "**Flow:** (1) voice channel · (2) add people · (3) **➕ Assign**\n"
+            "· **📂 From lists** — multiselect 🎙️ voice / 🟢 online / ⚫ offline\n"
+            "· **🔊 +All in voice** — stage everyone currently in a voice channel\n"
+            "**Auto:** 🎲 Random · ⚖️ MMR balance · **💾** Save · **📂** Presets\n"
             f"**Lobby:** {lobby}\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━"
+            "—\n"
+            "**⚙️ More** — clear all slots, history, recall"
         )
         if status:
             base += f"\n\n{status}"
         return base
 
-    @discord.ui.button(label="➕ Assign", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="📂 From lists", style=discord.ButtonStyle.primary, row=2)
+    async def open_lists(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = MemberCategoryPickView(self)
+        await interaction.response.send_message(view._header(), view=view, ephemeral=True)
+
+    @discord.ui.button(label="🧹 Clear staged", style=discord.ButtonStyle.secondary, row=2)
+    async def clear_staged(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.staged_member_ids.clear()
+        await interaction.response.edit_message(
+            content=self._builder_content("✅ Staging cleared."), view=self)
+
+    @discord.ui.button(label="🔊 +All in voice", style=discord.ButtonStyle.secondary, row=2)
+    async def add_all_voice(self, interaction: discord.Interaction, button: discord.ui.Button):
+        seen = {}
+        for vc in self.guild.voice_channels:
+            for m in vc.members:
+                if not m.bot:
+                    seen[m.id] = m
+        for mid in seen:
+            self.staged_member_ids.add(mid)
+        await interaction.response.edit_message(
+            content=self._builder_content(
+                f"✅ Staged **{len(seen)}** from voice ({len(self.staged_member_ids)} unique total)."
+            ),
+            view=self,
+        )
+
+    @discord.ui.button(label="➕ Assign", style=discord.ButtonStyle.success, row=3)
     async def assign(self, interaction: discord.Interaction, button: discord.ui.Button):
-        gid    = self.guild.id
-        chosen = self.member_select.selected_members
-        vc_id  = self.channel_select.selected_vc_id
-        if not chosen:
+        gid = self.guild.id
+        vc_id = self.channel_select.selected_vc_id
+        if not self.staged_member_ids:
             await interaction.response.edit_message(
-                content=self._builder_content("⚠️ Select members first."), view=self)
+                content=self._builder_content("⚠️ Stage members first (picker, lists, or **+All in voice**)."),
+                view=self,
+            )
             return
         if not vc_id:
             await interaction.response.edit_message(
-                content=self._builder_content("⚠️ Select a channel first."), view=self)
+                content=self._builder_content("⚠️ Pick a **team voice channel** first (top menu)."),
+                view=self,
+            )
             return
         if gid not in team_storage:
             team_storage[gid] = {}
         if vc_id not in team_storage[gid]:
             team_storage[gid][vc_id] = []
         added, moved_from = [], []
-        for m in chosen:
+        for mid in list(self.staged_member_ids):
+            m = self.guild.get_member(mid)
             if not m:
                 continue
             prev = find_member_team(gid, m.id)
@@ -777,19 +1006,19 @@ class TeamBuilderView(discord.ui.View):
                 team_storage[gid][prev].remove(m.id)
                 prev_vc = self.guild.get_channel(int(prev))
                 moved_from.append(
-                    f"{m.display_name} (was in {prev_vc.name if prev_vc else prev})")
+                    f"{m.display_name} (was {prev_vc.name if prev_vc else prev})")
             if m.id not in team_storage[gid][vc_id]:
                 team_storage[gid][vc_id].append(m.id)
                 added.append(m.display_name)
-        vc     = self.guild.get_channel(int(vc_id))
-        status = f"✅ **{vc.name if vc else vc_id}**: {', '.join(added)}"
+        self.staged_member_ids.clear()
+        vc = self.guild.get_channel(int(vc_id))
+        status = f"✅ **{vc.name if vc else vc_id}** ← {', '.join(added) or '—'}"
         if moved_from:
-            status += f" | 🔄 Moved: {', '.join(moved_from)}"
+            status += f"\n🔄 Reassigned: {', '.join(moved_from)}"
         status += f"\n\n{build_team_summary(self.guild, gid)}"
-        await interaction.response.edit_message(
-            content=self._builder_content(status), view=self)
+        await interaction.response.edit_message(content=self._builder_content(status), view=self)
 
-    @discord.ui.button(label="🚀 Send", style=discord.ButtonStyle.success, row=2)
+    @discord.ui.button(label="🚀 Send", style=discord.ButtonStyle.success, row=3)
     async def send_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         gid   = self.guild.id
         teams = team_storage.get(gid, {})
@@ -817,106 +1046,48 @@ class TeamBuilderView(discord.ui.View):
             results.append(line)
         save_team_to_history(gid, self.guild)
         await interaction.followup.send(
-            "🚀 **Teams dispatched!**\n" + "\n".join(results),
+            "## 🚀 Teams dispatched\n" + "\n".join(results),
             view=DismissView(), ephemeral=False)
 
-    @discord.ui.button(label="📋 Teams", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="📋 Teams", style=discord.ButtonStyle.secondary, row=3)
     async def show_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         summary = build_team_summary(self.guild, self.guild.id)
         await interaction.response.edit_message(
             content=self._builder_content(summary), view=self)
 
-    @discord.ui.button(label="🎲 Randomise", style=discord.ButtonStyle.primary, row=3)
+    @discord.ui.button(label="⚙️ More", style=discord.ButtonStyle.secondary, row=3)
+    async def more_tools(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "### ⚙️ Team Builder — more",
+            view=TeamBuilderToolsView(self),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="🎲 Randomise", style=discord.ButtonStyle.primary, row=4)
     async def randomise_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            "🎲 **Randomise Teams** — Pick channels:",
+            "### 🎲 Randomise teams\nPick **2–25** voice channels, then confirm.",
             view=RandomiseView(self.guild), ephemeral=True)
 
-    @discord.ui.button(label="⚖️ Balanced", style=discord.ButtonStyle.primary, row=3)
+    @discord.ui.button(label="⚖️ Balanced", style=discord.ButtonStyle.primary, row=4)
     async def balanced_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            "⚖️ **MMR Balanced Teams** — Pick channels:",
+            "### ⚖️ MMR-balanced teams\nPick channels to fill.",
             view=MatchmakeView(self.guild), ephemeral=True)
 
-    @discord.ui.button(label="💾 Save", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="💾 Save", style=discord.ButtonStyle.secondary, row=4)
     async def save_preset(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SavePresetModal(self.guild))
 
-    @discord.ui.button(label="📂 Presets", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="📂 Presets", style=discord.ButtonStyle.secondary, row=4)
     async def load_preset(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not presets.get(str(self.guild.id)):
             await interaction.response.send_message(
                 "⚠️ No presets saved yet.", ephemeral=True)
             return
         await interaction.response.send_message(
-            "📂 **Load Preset** — select one:",
+            "### 📂 Load preset\nSelect a saved lineup:",
             view=TeamPresetsView(self.guild), ephemeral=True)
-
-    @discord.ui.button(label="🗑️ Clear", style=discord.ButtonStyle.danger, row=4)
-    async def clear_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
-        team_storage.pop(self.guild.id, None)
-        await interaction.response.edit_message(
-            content=self._builder_content("✅ Teams cleared."), view=self)
-
-    @discord.ui.button(label="🔁 Recall All to Lobby", style=discord.ButtonStyle.secondary, row=4)
-    async def recall_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        saved_id = recall_channels.get(str(self.guild.id))
-        saved    = self.guild.get_channel(saved_id) if saved_id else None
-        if saved:
-            msg = f"🔁 **Recall** — lobby is set to **{saved.name}**"
-        else:
-            msg = "🔁 **Recall** — no lobby set yet, pick a channel:"
-        await interaction.response.send_message(msg, view=RecallPickerView(self.guild), ephemeral=True)
-
-    @discord.ui.button(label="📜 History", style=discord.ButtonStyle.secondary, row=4)
-    async def history_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not team_history.get(str(self.guild.id)):
-            await interaction.response.send_message(
-                "⚠️ No team history yet.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            "📜 **Team History**:",
-            view=TeamHistoryView(self.guild), ephemeral=True)
-
-
-class TeamMemberSelect(discord.ui.Select):
-    def __init__(self, members):
-        self.selected_members = []
-        if members:
-            options  = [discord.SelectOption(label=m.display_name, value=str(m.id))
-                        for m in members[:25]]
-            max_vals = min(len(members), 25)
-        else:
-            options  = [discord.SelectOption(label="No members in voice", value="none")]
-            max_vals = 1
-        super().__init__(placeholder="1️⃣ Pick member(s)...",
-                         options=options, min_values=1, max_values=max_vals, row=0)
-
-    async def callback(self, interaction: discord.Interaction):
-        if self.values == ["none"]:
-            await interaction.response.defer()
-            return
-        self.selected_members = [interaction.guild.get_member(int(uid))
-                                  for uid in self.values]
-        names = ", ".join(m.display_name for m in self.selected_members if m)
-        await interaction.response.edit_message(
-            content=f"👥 **Team Builder**\n✅ Selected: **{names}** — pick a channel then ➕",
-            view=self.view)
-
-
-class TeamChannelSelect(discord.ui.Select):
-    def __init__(self, vcs):
-        self.selected_vc_id = None
-        options = [discord.SelectOption(label=c.name, value=str(c.id)) for c in vcs[:25]]
-        super().__init__(placeholder="2️⃣ Pick their team channel...",
-                         options=options, min_values=1, max_values=1, row=1)
-
-    async def callback(self, interaction: discord.Interaction):
-        self.selected_vc_id = self.values[0]
-        vc = interaction.guild.get_channel(int(self.selected_vc_id))
-        await interaction.response.edit_message(
-            content=f"👥 **Team Builder**\n✅ Channel: **{vc.name if vc else '?'}** — click ➕ to assign",
-            view=self.view)
 
 # ─────────────────────────────────────────────
 # SLASH COMMANDS
@@ -954,6 +1125,7 @@ async def teams(interaction: discord.Interaction):
     view = TeamBuilderView(interaction.guild)
     await interaction.response.send_message(
         view._builder_content(), view=view, ephemeral=True)
+    view.message = await interaction.original_response()
 
 
 @bot.tree.command(name="sub",
@@ -997,10 +1169,10 @@ async def sub(interaction: discord.Interaction, player_out: str, player_in: str)
         await member_in.move_to(vc)
         voice_note = " and moved to voice"
     await interaction.response.send_message(
-        f"🔄 **Sub complete!**\n"
-        f"**{member_out.display_name}** ← out\n"
-        f"**{member_in.display_name}** → in{voice_note}\n"
-        f"Team: **{vc.name if vc else out_vc_id}**\n\n"
+        f"## 🔄 Sub complete\n"
+        f"**Out:** {member_out.display_name}\n"
+        f"**In:** {member_in.display_name}{voice_note}\n"
+        f"**Team:** {vc.name if vc else out_vc_id}\n\n"
         f"{build_team_summary(guild, gid)}",
         view=DismissView(), ephemeral=False)
 
