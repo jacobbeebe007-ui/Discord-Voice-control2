@@ -27,6 +27,7 @@ discord.py==2.3.2
 python-dotenv==1.0.0
 audioop-lts==0.2.1
 openpyxl==3.1.2
+pytest>=7.0.0
 ```
 
 Install with:
@@ -40,6 +41,8 @@ Create a `.env` file in the project root:
 ```
 DISCORD_BOT_TOKEN=your_token_here
 ```
+
+Optional: set `LOG_LEVEL` to `DEBUG`, `INFO`, `WARNING`, or `ERROR` (default is `INFO`).
 
 ### Running locally
 
@@ -116,7 +119,6 @@ The bot uses custom server emojis for the 22 Halo Reach ranks. Upload the follow
 | `/rivals [p1] [p2]` | Head-to-head session history and overall win tally |
 | `/stats` | Top performer in every stat category |
 | `/session [session] [player]` | A player's stats from a specific session e.g. `Session 1` |
-| `/matchmaking` | Roll Halo 3 maps, game types and teams — single or two match with veto |
 | `/help` | List all commands available to you |
 
 ### Admin Only
@@ -131,6 +133,8 @@ The bot uses custom server emojis for the 22 Halo Reach ranks. Upload the follow
 | `/export` | Download the current MMR data as a timestamped JSON backup |
 | `/presets` | View and load saved team lineup presets |
 | `/history` | Browse the last 10 team configurations |
+| `/matchmaking` | Roll Halo 3 maps, game types and teams — single or two match with veto |
+| `/orbital_jump` | Post the Orbital Jump approval roster panel (persistent buttons after bot restarts) |
 | `/sync` | Force re-sync slash commands if any are missing |
 
 ---
@@ -200,9 +204,10 @@ All data is saved to JSON files in the bot's working directory:
 | File | Contents |
 |---|---|
 | `mmr_data.json` | All player MMR, stats and session history |
-| `lobby_map.json` | Voice channel → lobby mappings |
+| `recall_channels.json` | Saved lobby channel for `/recall` |
 | `presets.json` | Saved team presets |
 | `team_history.json` | Last 10 team configurations |
+| `orbital_jump.json` | Orbital Jump roster text, emoji, and approved names per server |
 
 These persist across redeployments as long as Railway's volume is attached. Use `/export` regularly to keep a backup.
 
@@ -210,10 +215,24 @@ These persist across redeployments as long as Railway's volume is attached. Use 
 
 ## Development
 
+Code layout:
+
+- `bot.py` — bot instance, most slash commands, team builder UI, stats
+- `halo_bot/` — shared constants, JSON storage helpers, pure MMR/rank helpers (`pure.py`), and cogs under `halo_bot/cogs/` (matchmaking, orbital jump)
+
 To add a new command:
 
-1. Add `@bot.tree.command(name="...", description="...")` — prefix description with `[Admin]` for admin-only commands
+1. Add `@bot.tree.command(name="...", description="...")` in `bot.py` (or use an `app_commands.Cog` under `halo_bot/cogs/`) — prefix description with `[Admin]` for admin-only commands
 2. Add the `@is_admin()` decorator if admin only
-3. Add the error handler to the `@<command>.error` block at the bottom
+3. For commands on `bot.py`, register `cmd.error(_admin_error)` in `HaloBot.setup_hook` (see the `admin_cmd_names` tuple). Cog commands registered there use the same handler.
 4. Push to GitHub — Railway redeploys automatically
 5. The `/help` command updates itself automatically — no manual changes needed
+
+Run unit tests (no Discord token required for `halo_bot.pure` tests):
+
+```bash
+pip install -r requirements.txt
+pytest
+```
+
+`pytest.ini` sets `pythonpath` so `halo_bot` imports resolve from the repo root.
