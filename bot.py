@@ -1124,7 +1124,7 @@ async def teams(interaction: discord.Interaction):
         return
     view = TeamBuilderView(interaction.guild)
     await interaction.response.send_message(
-        view._builder_content(), view=view, ephemeral=True)
+        view._builder_content(), view=view, ephemeral=False)
     view.message = await interaction.original_response()
 
 
