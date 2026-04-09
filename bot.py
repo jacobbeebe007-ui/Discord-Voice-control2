@@ -1,4 +1,3 @@
-import logging
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -6,29 +5,7 @@ from collections import OrderedDict
 import json, os, random, io, datetime
 from dotenv import load_dotenv
 
-from halo_bot.checks import is_admin
-from halo_bot.constants import PROVISIONAL_SESSIONS, STATS_FILE, TIMEOUT_MENU, TIMEOUT_STAT
-from halo_bot.pure import calculate_mmr, canonical_name, halo_rank, normalise
-from halo_bot.storage import (
-    MMR_FILE,
-    PRESETS_FILE,
-    RECALL_FILE,
-    TEAM_HISTORY_FILE,
-    mmr_data,
-    presets,
-    recall_channels,
-    save_json,
-    team_history,
-    team_storage,
-)
-
 load_dotenv()
-
-logging.basicConfig(
-    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO),
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
-log = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -42,32 +19,70 @@ intents.members = True
 intents.voice_states = True
 intents.message_content = True
 
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-class HaloBot(commands.Bot):
-    async def setup_hook(self):
-        await self.load_extension("halo_bot.cogs.orbital")
-        await self.load_extension("halo_bot.cogs.matchmaking")
-        admin_cmd_names = (
-            "recall",
-            "teams",
-            "sub",
-            "import_mmr",
-            "export",
-            "presets",
-            "history",
-            "matchmaking",
-            "orbital_jump",
-            "sync",
-        )
-        for name in admin_cmd_names:
-            cmd = self.tree.get_command(name)
-            if cmd:
-                cmd.error(_admin_error)
+MMR_FILE          = "mmr_data.json"
+PRESETS_FILE      = "presets.json"
+TEAM_HISTORY_FILE = "team_history.json"
+RECALL_FILE       = "recall_channels.json"
+ORBITAL_FILE      = "orbital_jump.json"
+STATS_FILE        = "Collection_of_Stats_across_Halo_Nights.xlsx"
+PROVISIONAL_SESSIONS = 3
 
-
-bot = HaloBot(command_prefix="!", intents=intents)
-
+# Message timeout constants (seconds)
+TIMEOUT_STAT = 180   # stat lookups — 3 minutes
+TIMEOUT_MENU = 60    # pickers, menus — 1 minute
 # None = never auto-delete (team lists, leaderboard)
+
+def load_json(path):
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+mmr_data:        dict = load_json(MMR_FILE)
+presets:         dict = load_json(PRESETS_FILE)
+team_history:    dict = load_json(TEAM_HISTORY_FILE)
+recall_channels: dict = load_json(RECALL_FILE)
+orbital_jump_data: dict = load_json(ORBITAL_FILE)
+team_storage:    dict = {}
+
+def is_admin():
+    async def predicate(interaction: discord.Interaction):
+        return interaction.user.guild_permissions.administrator
+    return app_commands.check(predicate)
+
+# ─────────────────────────────────────────────
+# HALO REACH RANK SYSTEM
+# ─────────────────────────────────────────────
+HALO_RANKS = [
+    (95.5, "Inheritor",       "021_Inheritor"),
+    (91.0, "Reclaimer",       "020_Reclaimer"),
+    (86.5, "Forerunner",      "019_Forerunner"),
+    (82.0, "Nova",            "018_Nova"),
+    (77.5, "Eclipse",         "017_Eclipse"),
+    (73.0, "Noble",           "016_Noble"),
+    (68.5, "Mythic",          "015_Mythic"),
+    (64.0, "Legend",          "014_Legend"),
+    (59.5, "Hero",            "013_Hero"),
+    (55.0, "Field_Marshall",  "012_Field_Marshall"),
+    (50.5, "General",         "011_General"),
+    (46.0, "Brigadier",       "010_Brigadier"),
+    (41.5, "Colonel",         "009_Colonel"),
+    (37.0, "Commander",       "008_Commander"),
+    (32.5, "Lt_Colonel",      "007_Lt_Colonel"),
+    (28.0, "Major",           "006_Major"),
+    (23.5, "Captain",         "005_Captain"),
+    (19.0, "Warrant_Officer", "004_Warrant_Officer"),
+    (14.5, "Sergeant",        "003_Sergeant"),
+    (10.0, "Corporal",        "002_Corporal"),
+    (5.0,  "Private",         "001_Private"),
+    (0.0,  "Recruit",         "000_Recruit"),
+]
 
 def get_emoji(guild: discord.Guild, name: str) -> str:
     if guild:
@@ -75,6 +90,12 @@ def get_emoji(guild: discord.Guild, name: str) -> str:
         if e:
             return str(e)
     return f":{name}:"
+
+def halo_rank(mmr: float) -> tuple:
+    for threshold, name, ename in HALO_RANKS:
+        if mmr >= threshold:
+            return name, ename
+    return "Recruit", "000_Recruit"
 
 def rank_display(mmr: float, guild: discord.Guild, provisional: bool = False) -> str:
     rname, ename = halo_rank(mmr)
@@ -85,9 +106,26 @@ def rank_display(mmr: float, guild: discord.Guild, provisional: bool = False) ->
 def is_provisional(data: dict) -> bool:
     return data.get("sessions", 0) < PROVISIONAL_SESSIONS
 
+def canonical_name(raw: str) -> str:
+    return raw.split("(")[0].strip()
+
 # ─────────────────────────────────────────────
-# MMR CALCULATION (see halo_bot.pure for normalise / calculate_mmr)
+# MMR CALCULATION
 # ─────────────────────────────────────────────
+WEIGHTS = {"kd": 0.30, "points": 0.25, "obj_time": 0.25, "assists": 0.15, "captures": 0.05}
+
+def normalise(values: list) -> list:
+    mn, mx = min(values), max(values)
+    if mx == mn:
+        return [50.0] * len(values)
+    return [(v - mn) / (mx - mn) * 100 for v in values]
+
+def calculate_mmr(players: list) -> list:
+    keys = list(WEIGHTS.keys())
+    normed = {k: normalise([p[k] for p in players]) for k in keys}
+    for i, p in enumerate(players):
+        p["mmr"] = round(sum(normed[k][i] * WEIGHTS[k] for k in keys), 1)
+    return players
 
 def parse_session_sheet(ws) -> list:
     rows = list(ws.iter_rows(values_only=True))
@@ -301,11 +339,12 @@ def _select_options_from_members(members: list, desc_prefix: str) -> list:
         label = m.display_name[:80]
         if len(m.display_name) > 80:
             label = m.display_name[:77] + "…"
+        desc = f"{desc_prefix} · {m.status.name}"[:100]
         opts.append(
             discord.SelectOption(
                 label=label,
                 value=str(m.id),
-                description=f"{desc_prefix} · {m.status.name}",
+                description=desc or None,
             )
         )
     return opts
@@ -1090,6 +1129,412 @@ class TeamBuilderView(discord.ui.View):
             view=TeamPresetsView(self.guild), ephemeral=True)
 
 # ─────────────────────────────────────────────
+# HALO 3 MATCHMAKING
+# ─────────────────────────────────────────────
+def h3_img(filename: str) -> str:
+    return f"https://www.halopedia.org/Special:FilePath/{filename}"
+
+HALO3_MAPS = [
+    {"name": "Construct",   "img": h3_img("H3_Multiplayer_Construct.jpg"),   "dlc": False},
+    {"name": "Epitaph",     "img": h3_img("H3_Multiplayer_Epitaph.jpg"),     "dlc": False},
+    {"name": "Guardian",    "img": h3_img("H3_Multiplayer_Guardian.jpg"),    "dlc": False},
+    {"name": "High Ground", "img": h3_img("H3_Multiplayer_High_Ground.jpg"), "dlc": False},
+    {"name": "Isolation",   "img": h3_img("H3_Multiplayer_Isolation.jpg"),   "dlc": False},
+    {"name": "Last Resort", "img": h3_img("H3_Multiplayer_Last_Resort.jpg"), "dlc": False},
+    {"name": "Narrows",     "img": h3_img("H3_Multiplayer_Narrows.jpg"),     "dlc": False},
+    {"name": "Sandtrap",    "img": h3_img("H3_Multiplayer_Sandtrap.jpg"),    "dlc": False},
+    {"name": "Snowbound",   "img": h3_img("H3_Multiplayer_Snowbound.jpg"),   "dlc": False},
+    {"name": "The Pit",     "img": h3_img("H3_Multiplayer_The_Pit.jpg"),     "dlc": False},
+    {"name": "Valhalla",    "img": h3_img("H3_Multiplayer_Valhalla.jpg"),    "dlc": False},
+    {"name": "Foundry",     "img": h3_img("H3_Multiplayer_Foundry.jpg"),     "dlc": True},
+    {"name": "Rat's Nest",  "img": h3_img("H3_Multiplayer_Rats_Nest.jpg"),   "dlc": True},
+    {"name": "Standoff",    "img": h3_img("H3_Multiplayer_Standoff.jpg"),    "dlc": True},
+    {"name": "Avalanche",   "img": h3_img("H3_Multiplayer_Avalanche.jpg"),   "dlc": True},
+    {"name": "Blackout",    "img": h3_img("H3_Multiplayer_Blackout.jpg"),    "dlc": True},
+    {"name": "Ghost Town",  "img": h3_img("H3_Multiplayer_Ghost_Town.jpg"),  "dlc": True},
+    {"name": "Assembly",    "img": h3_img("H3_Multiplayer_Assembly.jpg"),    "dlc": True},
+    {"name": "Citadel",     "img": h3_img("H3_Multiplayer_Citadel.jpg"),     "dlc": True},
+    {"name": "Heretic",     "img": h3_img("H3_Multiplayer_Heretic.jpg"),     "dlc": True},
+    {"name": "Longshore",   "img": h3_img("H3_Multiplayer_Longshore.jpg"),   "dlc": True},
+    {"name": "Orbital",     "img": h3_img("H3_Multiplayer_Orbital.jpg"),     "dlc": True},
+    {"name": "Sandbox",     "img": h3_img("H3_Multiplayer_Sandbox.jpg"),     "dlc": True},
+]
+
+HALO3_GAMETYPES = [
+    "Slayer", "Team Slayer", "Capture the Flag", "Oddball",
+    "King of the Hill", "VIP", "Territories", "Assault", "Infection",
+]
+
+
+class MatchmakingMenuView(discord.ui.View):
+    """Opening menu — admin only, choose mode and settings."""
+    def __init__(self):
+        super().__init__(timeout=TIMEOUT_MENU)
+        self.team_count  = 2
+        self.include_dlc = False
+        # Team count select
+        team_opts = [discord.SelectOption(label=f"{i} Teams", value=str(i),
+                     default=(i == 2)) for i in range(2, 9)]
+        self.team_select = discord.ui.Select(
+            placeholder="Number of teams...", options=team_opts, row=0)
+        self.team_select.callback = self.on_team_select
+        self.add_item(self.team_select)
+        # Map pool select
+        pool_opts = [
+            discord.SelectOption(label="Standard maps only", value="standard", default=True),
+            discord.SelectOption(label="Standard + all DLC",  value="all"),
+        ]
+        self.pool_select = discord.ui.Select(
+            placeholder="Map pool...", options=pool_opts, row=1)
+        self.pool_select.callback = self.on_pool_select
+        self.add_item(self.pool_select)
+
+    async def on_team_select(self, interaction: discord.Interaction):
+        self.team_count = int(self.team_select.values[0])
+        await interaction.response.defer()
+
+    async def on_pool_select(self, interaction: discord.Interaction):
+        self.include_dlc = self.pool_select.values[0] == "all"
+        await interaction.response.defer()
+
+    def _get_maps(self):
+        return [m for m in HALO3_MAPS if not m["dlc"] or self.include_dlc]
+
+    @discord.ui.button(label="🎲 Single Match", style=discord.ButtonStyle.primary, row=2)
+    async def single_match(self, interaction: discord.Interaction, button: discord.ui.Button):
+        maps            = self._get_maps()
+        chosen_map      = random.choice(maps)
+        chosen_gametype = random.choice(HALO3_GAMETYPES)
+        embed = discord.Embed(title="🎮 Halo 3 — Match Roll", color=0x00aaff)
+        embed.add_field(name="🗺️ Map",       value=f"**{chosen_map['name']}**",  inline=True)
+        embed.add_field(name="🎯 Game Type", value=f"**{chosen_gametype}**",     inline=True)
+        embed.add_field(name="👥 Teams",     value=f"**{self.team_count}**",     inline=True)
+        embed.set_image(url=chosen_map["img"])
+        embed.set_footer(text="Halo Night Bot — Matchmaking")
+        await interaction.response.send_message(embed=embed, ephemeral=False)
+
+    @discord.ui.button(label="🎲🎲 Two Matches", style=discord.ButtonStyle.primary, row=2)
+    async def two_matches(self, interaction: discord.Interaction, button: discord.ui.Button):
+        maps   = self._get_maps()
+        sample = random.sample(maps, min(2, len(maps)))
+        m1, m2 = sample[0], sample[1]
+        g1     = random.choice(HALO3_GAMETYPES)
+        g2     = random.choice(HALO3_GAMETYPES)
+
+        embed1 = discord.Embed(title="🎮 Match 1", color=0x00aaff)
+        embed1.add_field(name="🗺️ Map",       value=f"**{m1['name']}**",    inline=True)
+        embed1.add_field(name="🎯 Game Type", value=f"**{g1}**",            inline=True)
+        embed1.add_field(name="👥 Teams",     value=f"**{self.team_count}**", inline=True)
+        embed1.set_image(url=m1["img"])
+
+        embed2 = discord.Embed(title="🎮 Match 2", color=0xff6600)
+        embed2.add_field(name="🗺️ Map",       value=f"**{m2['name']}**",    inline=True)
+        embed2.add_field(name="🎯 Game Type", value=f"**{g2}**",            inline=True)
+        embed2.add_field(name="👥 Teams",     value=f"**{self.team_count}**", inline=True)
+        embed2.set_image(url=m2["img"])
+
+        await interaction.response.send_message(
+            "⚔️ **Two matches rolled! Anyone can veto below.**",
+            embeds=[embed1, embed2],
+            view=VetoView(m1, g1, m2, g2, self.team_count, maps),
+            ephemeral=False)
+
+    @discord.ui.button(label="✕ Cancel", style=discord.ButtonStyle.secondary, row=2)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        await interaction.delete_original_response()
+
+
+class VetoView(discord.ui.View):
+    """Veto system — anyone can click. Each slot rerolls once then locks."""
+    def __init__(self, m1, g1, m2, g2, num_teams, maps):
+        super().__init__(timeout=300)
+        self.m1, self.g1 = m1, g1
+        self.m2, self.g2 = m2, g2
+        self.num_teams   = num_teams
+        self.maps        = maps
+        self.vetoed      = set()
+
+    def _build_embeds(self):
+        e1 = discord.Embed(title="🎮 Match 1", color=0x00aaff)
+        e1.add_field(name="🗺️ Map",       value=f"**{self.m1['name']}**",  inline=True)
+        e1.add_field(name="🎯 Game Type", value=f"**{self.g1}**",          inline=True)
+        e1.add_field(name="👥 Teams",     value=f"**{self.num_teams}**",   inline=True)
+        e1.set_image(url=self.m1["img"])
+        e2 = discord.Embed(title="🎮 Match 2", color=0xff6600)
+        e2.add_field(name="🗺️ Map",       value=f"**{self.m2['name']}**",  inline=True)
+        e2.add_field(name="🎯 Game Type", value=f"**{self.g2}**",          inline=True)
+        e2.add_field(name="👥 Teams",     value=f"**{self.num_teams}**",   inline=True)
+        e2.set_image(url=self.m2["img"])
+        return [e1, e2]
+
+    @discord.ui.button(label="🚫 Veto Match 1 Map",  style=discord.ButtonStyle.danger, row=0)
+    async def veto_m1_map(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if "m1_map" in self.vetoed:
+            await interaction.response.send_message(
+                "⚠️ Match 1 map already vetoed.", ephemeral=True); return
+        self.vetoed.add("m1_map")
+        old = self.m1["name"]
+        pool = [m for m in self.maps
+                if m["name"] != self.m1["name"] and m["name"] != self.m2["name"]]
+        self.m1 = random.choice(pool) if pool else self.m1
+        button.disabled = True; button.label = "✅ M1 Map Vetoed"
+        await interaction.response.edit_message(
+            content=f"🚫 **{interaction.user.display_name}** vetoed **{old}** → **{self.m1['name']}**",
+            embeds=self._build_embeds(), view=self)
+
+    @discord.ui.button(label="🚫 Veto Match 1 Type", style=discord.ButtonStyle.danger, row=0)
+    async def veto_m1_type(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if "m1_type" in self.vetoed:
+            await interaction.response.send_message(
+                "⚠️ Match 1 type already vetoed.", ephemeral=True); return
+        self.vetoed.add("m1_type")
+        old = self.g1
+        pool = [g for g in HALO3_GAMETYPES if g != self.g1]
+        self.g1 = random.choice(pool) if pool else self.g1
+        button.disabled = True; button.label = "✅ M1 Type Vetoed"
+        await interaction.response.edit_message(
+            content=f"🚫 **{interaction.user.display_name}** vetoed **{old}** → **{self.g1}**",
+            embeds=self._build_embeds(), view=self)
+
+    @discord.ui.button(label="🚫 Veto Match 2 Map",  style=discord.ButtonStyle.danger, row=1)
+    async def veto_m2_map(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if "m2_map" in self.vetoed:
+            await interaction.response.send_message(
+                "⚠️ Match 2 map already vetoed.", ephemeral=True); return
+        self.vetoed.add("m2_map")
+        old = self.m2["name"]
+        pool = [m for m in self.maps
+                if m["name"] != self.m1["name"] and m["name"] != self.m2["name"]]
+        self.m2 = random.choice(pool) if pool else self.m2
+        button.disabled = True; button.label = "✅ M2 Map Vetoed"
+        await interaction.response.edit_message(
+            content=f"🚫 **{interaction.user.display_name}** vetoed **{old}** → **{self.m2['name']}**",
+            embeds=self._build_embeds(), view=self)
+
+    @discord.ui.button(label="🚫 Veto Match 2 Type", style=discord.ButtonStyle.danger, row=1)
+    async def veto_m2_type(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if "m2_type" in self.vetoed:
+            await interaction.response.send_message(
+                "⚠️ Match 2 type already vetoed.", ephemeral=True); return
+        self.vetoed.add("m2_type")
+        old = self.g2
+        pool = [g for g in HALO3_GAMETYPES if g != self.g2]
+        self.g2 = random.choice(pool) if pool else self.g2
+        button.disabled = True; button.label = "✅ M2 Type Vetoed"
+        await interaction.response.edit_message(
+            content=f"🚫 **{interaction.user.display_name}** vetoed **{old}** → **{self.g2}**",
+            embeds=self._build_embeds(), view=self)
+
+    @discord.ui.button(label="✅ Lock In", style=discord.ButtonStyle.success, row=2)
+    async def lock_in(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="🔒 **Matches locked in! Good luck!**",
+            embeds=self._build_embeds(), view=self)
+
+# ─────────────────────────────────────────────
+# ORBITAL JUMP APPROVAL BOARD
+# ─────────────────────────────────────────────
+ORBITAL_MAX_SLOTS = 16
+
+
+def get_orbital_state(guild_id: int) -> dict:
+    gid = str(guild_id)
+    if gid not in orbital_jump_data:
+        orbital_jump_data[gid] = {
+            "message": "Spartans approved for Orbital Jump. Lock and load.",
+            "emoji": "🚀",
+            "approved": [],
+        }
+    return orbital_jump_data[gid]
+
+
+def save_orbital_state():
+    save_json(ORBITAL_FILE, orbital_jump_data)
+
+
+def parse_names(raw: str) -> list:
+    parts = [p.strip() for p in raw.replace("\n", ",").split(",")]
+    return [p for p in parts if p]
+
+
+def orbital_embed(guild: discord.Guild) -> discord.Embed:
+    state = get_orbital_state(guild.id)
+    approved = state.get("approved", [])[:ORBITAL_MAX_SLOTS]
+    used = len(approved)
+    remaining = ORBITAL_MAX_SLOTS - used
+    icon = state.get("emoji", "🚀")
+
+    embed = discord.Embed(
+        title=f"{icon} Halo 3 — Orbital Jump Roster",
+        description=state.get("message", ""),
+        color=0x2E8B57,
+    )
+    if approved:
+        lines = [f"{i}. {name}" for i, name in enumerate(approved, 1)]
+        embed.add_field(name="✅ Approved Spartans", value="\n".join(lines), inline=False)
+    else:
+        embed.add_field(name="✅ Approved Spartans", value="_No approvals yet._", inline=False)
+    embed.add_field(name="📦 Positions", value=f"**{used}/{ORBITAL_MAX_SLOTS}**")
+    embed.add_field(name="🪂 Remaining", value=f"**{remaining}**")
+    embed.set_footer(text="UNSC Deployment Console")
+    return embed
+
+
+class OrbitalAddModal(discord.ui.Modal, title="Add Approved Spartans"):
+    names = discord.ui.TextInput(
+        label="Names (comma or new line separated)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Chief, Arbiter, Johnson",
+        max_length=500,
+    )
+
+    def __init__(self, view):
+        super().__init__()
+        self.parent_view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        state = get_orbital_state(interaction.guild_id)
+        existing = state.get("approved", [])
+        incoming = parse_names(str(self.names.value))
+        added = 0
+        for name in incoming:
+            if name not in existing and len(existing) < ORBITAL_MAX_SLOTS:
+                existing.append(name)
+                added += 1
+        state["approved"] = existing[:ORBITAL_MAX_SLOTS]
+        save_orbital_state()
+        await self.parent_view.refresh_message()
+        await interaction.response.send_message(
+            f"✅ Added **{added}** Spartan(s).", ephemeral=True
+        )
+
+
+class OrbitalRemoveModal(discord.ui.Modal, title="Remove Approved Spartans"):
+    names = discord.ui.TextInput(
+        label="Names to remove (comma or new line)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Type exact names to remove",
+        max_length=500,
+    )
+
+    def __init__(self, view):
+        super().__init__()
+        self.parent_view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        state = get_orbital_state(interaction.guild_id)
+        existing = state.get("approved", [])
+        targets = set(parse_names(str(self.names.value)))
+        before = len(existing)
+        state["approved"] = [n for n in existing if n not in targets]
+        removed = before - len(state["approved"])
+        save_orbital_state()
+        await self.parent_view.refresh_message()
+        await interaction.response.send_message(
+            f"🗑️ Removed **{removed}** Spartan(s).", ephemeral=True
+        )
+
+
+class OrbitalEditMessageModal(discord.ui.Modal, title="Edit Orbital Jump Message"):
+    message = discord.ui.TextInput(
+        label="Message text",
+        style=discord.TextStyle.paragraph,
+        placeholder="Mission briefing or requirements...",
+        max_length=800,
+    )
+
+    def __init__(self, view, current_message: str):
+        super().__init__()
+        self.parent_view = view
+        self.message.default = current_message
+
+    async def on_submit(self, interaction: discord.Interaction):
+        state = get_orbital_state(interaction.guild_id)
+        state["message"] = str(self.message.value).strip()
+        save_orbital_state()
+        await self.parent_view.refresh_message()
+        await interaction.response.send_message("✏️ Message updated.", ephemeral=True)
+
+
+class OrbitalEmojiModal(discord.ui.Modal, title="Set Orbital Jump Emoji"):
+    emoji = discord.ui.TextInput(
+        label="Emoji or text symbol",
+        placeholder="🚀 or <:custom:1234567890>",
+        max_length=50,
+    )
+
+    def __init__(self, view, current_emoji: str):
+        super().__init__()
+        self.parent_view = view
+        self.emoji.default = current_emoji
+
+    async def on_submit(self, interaction: discord.Interaction):
+        state = get_orbital_state(interaction.guild_id)
+        value = str(self.emoji.value).strip()
+        state["emoji"] = value or "🚀"
+        save_orbital_state()
+        await self.parent_view.refresh_message()
+        await interaction.response.send_message("🎨 Orbital emoji updated.", ephemeral=True)
+
+
+class OrbitalJumpView(discord.ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=None)
+        self.guild = guild
+        self.message = None
+
+    async def refresh_message(self):
+        if self.message:
+            await self.message.edit(embed=orbital_embed(self.guild), view=self)
+
+    async def _require_admin(self, interaction: discord.Interaction) -> bool:
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ Administrator permissions required.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="➕ Add", style=discord.ButtonStyle.success, row=0)
+    async def add_people(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.send_modal(OrbitalAddModal(self))
+
+    @discord.ui.button(label="➖ Remove", style=discord.ButtonStyle.danger, row=0)
+    async def remove_people(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.send_modal(OrbitalRemoveModal(self))
+
+    @discord.ui.button(label="✏️ Edit Message", style=discord.ButtonStyle.primary, row=1)
+    async def edit_message(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._require_admin(interaction):
+            return
+        current = get_orbital_state(interaction.guild_id).get("message", "")
+        await interaction.response.send_modal(OrbitalEditMessageModal(self, current))
+
+    @discord.ui.button(label="🎨 Set Emoji", style=discord.ButtonStyle.secondary, row=1)
+    async def set_emoji(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._require_admin(interaction):
+            return
+        current = get_orbital_state(interaction.guild_id).get("emoji", "🚀")
+        await interaction.response.send_modal(OrbitalEmojiModal(self, current))
+
+    @discord.ui.button(label="🧹 Reset", style=discord.ButtonStyle.secondary, row=2)
+    async def reset_roster(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._require_admin(interaction):
+            return
+        state = get_orbital_state(interaction.guild_id)
+        state["approved"] = []
+        save_orbital_state()
+        await self.refresh_message()
+        await interaction.response.send_message("🧹 Orbital Jump roster reset.", ephemeral=True)
+
+# ─────────────────────────────────────────────
 # SLASH COMMANDS
 # ─────────────────────────────────────────────
 
@@ -1692,6 +2137,32 @@ async def view_history(interaction: discord.Interaction):
         view=TeamHistoryView(interaction.guild), ephemeral=True)
 
 
+@bot.tree.command(name="matchmaking",
+    description="[Admin] Roll Halo 3 maps, game types and teams for your night.")
+@is_admin()
+async def matchmaking(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "🎮 **Halo 3 Matchmaking** — set options then choose a mode:",
+        view=MatchmakingMenuView(), ephemeral=True)
+
+
+@bot.tree.command(name="orbital_jump",
+    description="[Admin] Manage the Halo 3 Orbital Jump approval roster (0/16).")
+@is_admin()
+async def orbital_jump(interaction: discord.Interaction):
+    state = get_orbital_state(interaction.guild_id)
+    state["approved"] = state.get("approved", [])[:ORBITAL_MAX_SLOTS]
+    save_orbital_state()
+    view = OrbitalJumpView(interaction.guild)
+    await interaction.response.send_message(
+        "🛰️ **Orbital Jump Control** — Admins can manage approvals with the panel below.",
+        embed=orbital_embed(interaction.guild),
+        view=view,
+        ephemeral=False,
+    )
+    view.message = await interaction.original_response()
+
+
 @bot.tree.command(name="podium", description="Show 🥇🥈🥉 top 3 in every stat category.")
 async def podium(interaction: discord.Interaction):
     gmmr = get_guild_mmr(interaction.guild_id)
@@ -1773,18 +2244,15 @@ async def sync_commands(interaction: discord.Interaction):
     for guild in bot.guilds:
         try:
             await bot.tree.sync(guild=guild)
-        except Exception as e:
-            log.warning(
-                "Guild command sync failed for %s (%s): %s",
-                getattr(guild, "name", "?"),
-                guild.id,
-                e,
-            )
+        except Exception:
+            pass
     await interaction.followup.send(
         "✅ Commands synced! New commands should appear within 30 seconds.",
         ephemeral=True)
 
-
+# ─────────────────────────────────────────────
+# ERROR HANDLERS
+# ─────────────────────────────────────────────
 async def _admin_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.CheckFailure):
         await interaction.response.send_message(
@@ -1792,27 +2260,9 @@ async def _admin_error(interaction: discord.Interaction, error):
     else:
         raise error
 
-
-# ─────────────────────────────────────────────
-# ERROR HANDLERS
-# ─────────────────────────────────────────────
-@bot.tree.error
-async def on_app_command_error(
-    interaction: discord.Interaction, error: app_commands.AppCommandError
-):
-    if isinstance(error, app_commands.CommandInvokeError):
-        log.exception("App command failed", exc_info=error.original)
-        try:
-            msg = "Something went wrong. If this keeps happening, notify a server admin."
-            if interaction.response.is_done():
-                await interaction.followup.send(msg, ephemeral=True)
-            else:
-                await interaction.response.send_message(msg, ephemeral=True)
-        except discord.HTTPException:
-            log.warning("Could not send error message for failed app command")
-        return
-    raise error
-
+for cmd in [recall, teams, sub, import_mmr, export,
+            view_presets, view_history, matchmaking, orbital_jump, sync_commands]:
+    cmd.error(_admin_error)
 
 # ─────────────────────────────────────────────
 # STARTUP
@@ -1823,15 +2273,10 @@ async def on_ready():
     for guild in bot.guilds:
         try:
             await bot.tree.sync(guild=guild)
-        except Exception as e:
-            log.warning(
-                "Guild command sync failed for %s (%s): %s",
-                getattr(guild, "name", "?"),
-                guild.id,
-                e,
-            )
-    log.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
-    log.info("Slash commands synced to %s guild(s).", len(bot.guilds))
+        except Exception:
+            pass
+    print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+    print(f"   Slash commands synced to {len(bot.guilds)} guild(s).")
 
 if __name__ == "__main__":
     bot.run(TOKEN)
