@@ -7,21 +7,91 @@ from urllib.request import urlopen
 from dotenv import load_dotenv
 from mmr_interface import MMRHubView
 
-from halo_bot.checks import is_admin
-from halo_bot.constants import PROVISIONAL_SESSIONS, TIMEOUT_MENU, TIMEOUT_STAT
-from halo_bot.pure import calculate_mmr, canonical_name, halo_rank, normalise
-from halo_bot.storage import (
-    MMR_FILE,
-    PRESETS_FILE,
-    RECALL_FILE,
-    TEAM_HISTORY_FILE,
-    mmr_data,
-    presets,
-    recall_channels,
-    save_json,
-    team_history,
-    team_storage,
-)
+try:
+    from halo_bot.checks import is_admin
+    from halo_bot.constants import PROVISIONAL_SESSIONS, TIMEOUT_MENU, TIMEOUT_STAT
+    from halo_bot.pure import calculate_mmr, canonical_name, halo_rank, normalise
+    from halo_bot.storage import (
+        MMR_FILE,
+        PRESETS_FILE,
+        RECALL_FILE,
+        TEAM_HISTORY_FILE,
+        mmr_data,
+        presets,
+        recall_channels,
+        save_json,
+        team_history,
+        team_storage,
+    )
+    HAS_HALO_BOT = True
+except ModuleNotFoundError:
+    HAS_HALO_BOT = False
+
+    PROVISIONAL_SESSIONS = 3
+    TIMEOUT_STAT = 180
+    TIMEOUT_MENU = 60
+
+    MMR_FILE = "mmr_data.json"
+    PRESETS_FILE = "presets.json"
+    TEAM_HISTORY_FILE = "team_history.json"
+    RECALL_FILE = "recall_channels.json"
+
+    HALO_RANKS = [
+        (95.5, "Inheritor", "021_Inheritor"), (91.0, "Reclaimer", "020_Reclaimer"),
+        (86.5, "Forerunner", "019_Forerunner"), (82.0, "Nova", "018_Nova"),
+        (77.5, "Eclipse", "017_Eclipse"), (73.0, "Noble", "016_Noble"),
+        (68.5, "Mythic", "015_Mythic"), (64.0, "Legend", "014_Legend"),
+        (59.5, "Hero", "013_Hero"), (55.0, "Field_Marshall", "012_Field_Marshall"),
+        (50.5, "General", "011_General"), (46.0, "Brigadier", "010_Brigadier"),
+        (41.5, "Colonel", "009_Colonel"), (37.0, "Commander", "008_Commander"),
+        (32.5, "Lt_Colonel", "007_Lt_Colonel"), (28.0, "Major", "006_Major"),
+        (23.5, "Captain", "005_Captain"), (19.0, "Warrant_Officer", "004_Warrant_Officer"),
+        (14.5, "Sergeant", "003_Sergeant"), (10.0, "Corporal", "002_Corporal"),
+        (5.0, "Private", "001_Private"), (0.0, "Recruit", "000_Recruit"),
+    ]
+
+    def halo_rank(mmr: float) -> tuple:
+        for threshold, name, ename in HALO_RANKS:
+            if mmr >= threshold:
+                return name, ename
+        return "Recruit", "000_Recruit"
+
+    def canonical_name(raw: str) -> str:
+        return raw.split("(")[0].strip()
+
+    def normalise(values: list) -> list:
+        mn, mx = min(values), max(values)
+        if mx == mn:
+            return [50.0] * len(values)
+        return [(v - mn) / (mx - mn) * 100 for v in values]
+
+    def calculate_mmr(players: list) -> list:
+        weights = {"kd": 0.30, "points": 0.25, "obj_time": 0.25, "assists": 0.15, "captures": 0.05}
+        normed = {k: normalise([p[k] for p in players]) for k in weights}
+        for i, p in enumerate(players):
+            p["mmr"] = round(sum(normed[k][i] * weights[k] for k in weights), 1)
+        return players
+
+    def is_admin():
+        async def predicate(interaction: discord.Interaction):
+            return interaction.user.guild_permissions.administrator
+        return app_commands.check(predicate)
+
+    def _load_json(path: str) -> dict:
+        if not os.path.exists(path):
+            return {}
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def save_json(path: str, data):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    mmr_data = _load_json(MMR_FILE)
+    presets = _load_json(PRESETS_FILE)
+    team_history = _load_json(TEAM_HISTORY_FILE)
+    recall_channels = _load_json(RECALL_FILE)
+    team_storage: dict = {}
 
 load_dotenv()
 
@@ -41,8 +111,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 class HaloBot(commands.Bot):
     async def setup_hook(self):
-        await self.load_extension("halo_bot.cogs.orbital")
-        await self.load_extension("halo_bot.cogs.matchmaking")
+        if HAS_HALO_BOT:
+            await self.load_extension("halo_bot.cogs.orbital")
+            await self.load_extension("halo_bot.cogs.matchmaking")
         admin_cmd_names = (
             "recall",
             "teams",
@@ -82,49 +153,11 @@ def load_json(path):
             return json.load(f)
     return {}
 
-def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-
-mmr_data:        dict = load_json(MMR_FILE)
-presets:         dict = load_json(PRESETS_FILE)
-team_history:    dict = load_json(TEAM_HISTORY_FILE)
-recall_channels: dict = load_json(RECALL_FILE)
-orbital_jump_data: dict = load_json(ORBITAL_FILE)
-team_storage:    dict = {}
-
-def is_admin():
-    async def predicate(interaction: discord.Interaction):
-        return interaction.user.guild_permissions.administrator
-    return app_commands.check(predicate)
-
-# ─────────────────────────────────────────────
-# HALO REACH RANK SYSTEM
-# ─────────────────────────────────────────────
-HALO_RANKS = [
-    (95.5, "Inheritor",       "021_Inheritor"),
-    (91.0, "Reclaimer",       "020_Reclaimer"),
-    (86.5, "Forerunner",      "019_Forerunner"),
-    (82.0, "Nova",            "018_Nova"),
-    (77.5, "Eclipse",         "017_Eclipse"),
-    (73.0, "Noble",           "016_Noble"),
-    (68.5, "Mythic",          "015_Mythic"),
-    (64.0, "Legend",          "014_Legend"),
-    (59.5, "Hero",            "013_Hero"),
-    (55.0, "Field_Marshall",  "012_Field_Marshall"),
-    (50.5, "General",         "011_General"),
-    (46.0, "Brigadier",       "010_Brigadier"),
-    (41.5, "Colonel",         "009_Colonel"),
-    (37.0, "Commander",       "008_Commander"),
-    (32.5, "Lt_Colonel",      "007_Lt_Colonel"),
-    (28.0, "Major",           "006_Major"),
-    (23.5, "Captain",         "005_Captain"),
-    (19.0, "Warrant_Officer", "004_Warrant_Officer"),
-    (14.5, "Sergeant",        "003_Sergeant"),
-    (10.0, "Corporal",        "002_Corporal"),
-    (5.0,  "Private",         "001_Private"),
-    (0.0,  "Recruit",         "000_Recruit"),
-]
+# None = never auto-delete (team lists, leaderboard)
+GOOGLE_SHEET_XLSX_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1O4Ez5uVnxbFDLooKfwPPxQHyFKq-SnX_s1CklwRP-Ik/export?format=xlsx"
+)
 
 def get_emoji(guild: discord.Guild, name: str) -> str:
     if guild:
