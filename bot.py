@@ -5,6 +5,7 @@ from discord import app_commands
 from collections import OrderedDict
 import json, os, random, io, datetime
 from dotenv import load_dotenv
+from mmr_interface import MMRHubView
 
 from halo_bot.checks import is_admin
 from halo_bot.constants import PROVISIONAL_SESSIONS, STATS_FILE, TIMEOUT_MENU, TIMEOUT_STAT
@@ -1124,7 +1125,7 @@ async def teams(interaction: discord.Interaction):
         return
     view = TeamBuilderView(interaction.guild)
     await interaction.response.send_message(
-        view._builder_content(), view=view, ephemeral=True)
+        view._builder_content(), view=view, ephemeral=False)
     view.message = await interaction.original_response()
 
 
@@ -1731,6 +1732,32 @@ async def podium(interaction: discord.Interaction):
         lines.append("")
 
     await send_single_or_chunked(interaction, lines, ephemeral=False, timeout=TIMEOUT_STAT)
+
+
+@bot.tree.command(
+    name="mmr_hub",
+    description="Open a one-command MMR/stats interface with a dropdown menu.")
+async def mmr_hub(interaction: discord.Interaction):
+    handlers = {
+        "leaderboard": lambda inter: leaderboard.callback(inter),
+        "mmr": lambda inter, player: mmr_lookup.callback(inter, player),
+        "compare": lambda inter, players: compare.callback(
+            inter,
+            players[0],
+            players[1],
+            players[2] if len(players) > 2 else None,
+            players[3] if len(players) > 3 else None,
+        ),
+        "rivals": lambda inter, p1, p2: rivals.callback(inter, p1, p2),
+        "session": lambda inter, number, player: session_lookup.callback(inter, number, player),
+        "podium": lambda inter: podium.callback(inter),
+        "stats": lambda inter: stats.callback(inter),
+    }
+    await interaction.response.send_message(
+        "📘 **MMR & Stats Interface** — select an action from the dropdown:",
+        view=MMRHubView(handlers),
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="help", description="List all available commands.")
