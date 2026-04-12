@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 from collections import OrderedDict
 import json, os, random, io, datetime
+import re
 from urllib.request import urlopen
 from dotenv import load_dotenv
 from mmr_interface import MMRHubView
@@ -158,6 +159,7 @@ GOOGLE_SHEET_XLSX_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1O4Ez5uVnxbFDLooKfwPPxQHyFKq-SnX_s1CklwRP-Ik/export?format=xlsx"
 )
+LOCAL_STATS_FILE = "Collection_of_Stats_across_Halo_Nights.xlsx"
 
 
 class _LegacyCommandShim:
@@ -193,8 +195,13 @@ def rank_display(mmr: float, guild: discord.Guild, provisional: bool = False) ->
 def is_provisional(data: dict) -> bool:
     return data.get("sessions", 0) < PROVISIONAL_SESSIONS
 
-def canonical_name(raw: str) -> str:
-    return raw.split("(")[0].strip()
+
+def session_sort_key(label: str) -> tuple:
+    text = str(label or "").strip()
+    m = re.search(r"(\d+)", text)
+    if m:
+        return (0, int(m.group(1)))
+    return (1, text.lower())
 
 # ─────────────────────────────────────────────
 # MMR CALCULATION
@@ -1730,12 +1737,16 @@ async def import_mmr(interaction: discord.Interaction,
                     wb = openpyxl.load_workbook(io.BytesIO(resp.read()))
                 source_label = "Google Sheet"
             except Exception:
-                await interaction.followup.send(
-                    "⚠️ Could not fetch the Google Sheet right now.\n"
-                    "Please upload a `.xlsx` file to `/import_mmr file:` instead.",
-                    ephemeral=True,
-                )
-                return
+                if os.path.exists(LOCAL_STATS_FILE):
+                    wb = openpyxl.load_workbook(LOCAL_STATS_FILE)
+                    source_label = f"`{LOCAL_STATS_FILE}` from repo"
+                else:
+                    await interaction.followup.send(
+                        "⚠️ Could not fetch the Google Sheet and no local stats file was found.\n"
+                        "Please upload a `.xlsx` file to `/import_mmr file:` instead.",
+                        ephemeral=True,
+                    )
+                    return
 
         gid = str(interaction.guild_id)
         if gid not in mmr_data:
@@ -1797,7 +1808,7 @@ async def import_mmr(interaction: discord.Interaction,
             for s in sessions_list:
                 if s["session"] not in existing_sessions:
                     new_history.append(s)
-            merged_history = sorted(new_history, key=lambda x: normalise(x.get("session", "")))
+            merged_history = sorted(new_history, key=lambda x: session_sort_key(x.get("session", "")))
             if lb:
                 overall = lb["mmr"]
                 kd, kills, deaths = lb["kd"], lb.get("kills", 0), lb.get("deaths", 0)
