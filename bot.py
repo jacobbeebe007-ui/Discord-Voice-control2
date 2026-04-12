@@ -3,11 +3,12 @@ from discord.ext import commands
 from discord import app_commands
 from collections import OrderedDict
 import json, os, random, io, datetime
+from urllib.request import urlopen
 from dotenv import load_dotenv
 from mmr_interface import MMRHubView
 
 from halo_bot.checks import is_admin
-from halo_bot.constants import PROVISIONAL_SESSIONS, STATS_FILE, TIMEOUT_MENU, TIMEOUT_STAT
+from halo_bot.constants import PROVISIONAL_SESSIONS, TIMEOUT_MENU, TIMEOUT_STAT
 from halo_bot.pure import calculate_mmr, canonical_name, halo_rank, normalise
 from halo_bot.storage import (
     MMR_FILE,
@@ -70,6 +71,10 @@ class HaloBot(commands.Bot):
 TIMEOUT_STAT = 180   # stat lookups — 3 minutes
 TIMEOUT_MENU = 60    # pickers, menus — 1 minute
 # None = never auto-delete (team lists, leaderboard)
+GOOGLE_SHEET_XLSX_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1O4Ez5uVnxbFDLooKfwPPxQHyFKq-SnX_s1CklwRP-Ik/export?format=xlsx"
+)
 
 def load_json(path):
     if os.path.exists(path):
@@ -1660,7 +1665,7 @@ async def sub(interaction: discord.Interaction, player_out: str, player_in: str)
 
 
 @bot.tree.command(name="import_mmr",
-    description="[Admin] Import stats from the repo Excel file, or upload a new one.")
+    description="[Admin] Import stats from Google Sheets, or upload a new file.")
 @is_admin()
 async def import_mmr(interaction: discord.Interaction,
                      file: discord.Attachment = None):
@@ -1674,15 +1679,18 @@ async def import_mmr(interaction: discord.Interaction,
                 return
             wb = openpyxl.load_workbook(io.BytesIO(await file.read()))
             source_label = f"uploaded file `{file.filename}`"
-        elif os.path.exists(STATS_FILE):
-            wb = openpyxl.load_workbook(STATS_FILE)
-            source_label = f"`{STATS_FILE}` from repo"
         else:
-            await interaction.followup.send(
-                f"⚠️ No file uploaded and `{STATS_FILE}` not found in the repo.\n"
-                "Commit the Excel file to GitHub or upload it directly.",
-                ephemeral=True)
-            return
+            try:
+                with urlopen(GOOGLE_SHEET_XLSX_URL, timeout=20) as resp:
+                    wb = openpyxl.load_workbook(io.BytesIO(resp.read()))
+                source_label = "Google Sheet"
+            except Exception:
+                await interaction.followup.send(
+                    "⚠️ Could not fetch the Google Sheet right now.\n"
+                    "Please upload a `.xlsx` file to `/import_mmr file:` instead.",
+                    ephemeral=True,
+                )
+                return
 
         gid = str(interaction.guild_id)
         if gid not in mmr_data:
