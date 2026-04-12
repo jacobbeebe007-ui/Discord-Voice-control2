@@ -4,23 +4,102 @@ from discord.ext import commands
 from discord import app_commands
 from collections import OrderedDict
 import json, os, random, io, datetime
+import re
+from urllib.request import urlopen
 from dotenv import load_dotenv
+from mmr_interface import MMRHubView
 
-from halo_bot.checks import is_admin
-from halo_bot.constants import PROVISIONAL_SESSIONS, STATS_FILE, TIMEOUT_MENU, TIMEOUT_STAT
-from halo_bot.pure import calculate_mmr, canonical_name, halo_rank, normalise
-from halo_bot.storage import (
-    MMR_FILE,
-    PRESETS_FILE,
-    RECALL_FILE,
-    TEAM_HISTORY_FILE,
-    mmr_data,
-    presets,
-    recall_channels,
-    save_json,
-    team_history,
-    team_storage,
-)
+try:
+    from halo_bot.checks import is_admin
+    from halo_bot.constants import PROVISIONAL_SESSIONS, TIMEOUT_MENU, TIMEOUT_STAT
+    from halo_bot.pure import calculate_mmr, canonical_name, halo_rank, normalise
+    from halo_bot.storage import (
+        MMR_FILE,
+        PRESETS_FILE,
+        RECALL_FILE,
+        TEAM_HISTORY_FILE,
+        mmr_data,
+        presets,
+        recall_channels,
+        save_json,
+        team_history,
+        team_storage,
+    )
+    HAS_HALO_BOT = True
+except ModuleNotFoundError:
+    HAS_HALO_BOT = False
+
+    PROVISIONAL_SESSIONS = 3
+    TIMEOUT_STAT = 180
+    TIMEOUT_MENU = 60
+
+    MMR_FILE = "mmr_data.json"
+    PRESETS_FILE = "presets.json"
+    TEAM_HISTORY_FILE = "team_history.json"
+    RECALL_FILE = "recall_channels.json"
+
+    HALO_RANKS = [
+        (95.5, "Inheritor", "021_Inheritor"), (91.0, "Reclaimer", "020_Reclaimer"),
+        (86.5, "Forerunner", "019_Forerunner"), (82.0, "Nova", "018_Nova"),
+        (77.5, "Eclipse", "017_Eclipse"), (73.0, "Noble", "016_Noble"),
+        (68.5, "Mythic", "015_Mythic"), (64.0, "Legend", "014_Legend"),
+        (59.5, "Hero", "013_Hero"), (55.0, "Field_Marshall", "012_Field_Marshall"),
+        (50.5, "General", "011_General"), (46.0, "Brigadier", "010_Brigadier"),
+        (41.5, "Colonel", "009_Colonel"), (37.0, "Commander", "008_Commander"),
+        (32.5, "Lt_Colonel", "007_Lt_Colonel"), (28.0, "Major", "006_Major"),
+        (23.5, "Captain", "005_Captain"), (19.0, "Warrant_Officer", "004_Warrant_Officer"),
+        (14.5, "Sergeant", "003_Sergeant"), (10.0, "Corporal", "002_Corporal"),
+        (5.0, "Private", "001_Private"), (0.0, "Recruit", "000_Recruit"),
+    ]
+
+    def halo_rank(mmr: float) -> tuple:
+        for threshold, name, ename in HALO_RANKS:
+            if mmr >= threshold:
+                return name, ename
+        return "Recruit", "000_Recruit"
+
+    def canonical_name(raw: str) -> str:
+        return raw.split("(")[0].strip()
+
+    def normalise(values: list) -> list:
+        mn, mx = min(values), max(values)
+        if mx == mn:
+            return [50.0] * len(values)
+        return [(v - mn) / (mx - mn) * 100 for v in values]
+
+    def calculate_mmr(players: list) -> list:
+        weights = {"points": 0.40, "kills": 0.30, "kd": 0.10, "kda": 0.10, "objective": 0.10}
+        for p in players:
+            kills = float(p.get("kills", 0) or 0)
+            assists = float(p.get("assists", 0) or 0)
+            deaths = max(float(p.get("deaths", 0) or 0), 1.0)
+            p["kda"] = (kills + assists) / deaths
+            p["objective"] = float(p.get("obj_time", 0) or 0) + (float(p.get("captures", 0) or 0) * 100.0)
+        normed = {k: normalise([float(p.get(k, 0) or 0) for p in players]) for k in weights}
+        for i, p in enumerate(players):
+            p["mmr"] = round(sum(normed[k][i] * weights[k] for k in weights), 1)
+        return players
+
+    def is_admin():
+        async def predicate(interaction: discord.Interaction):
+            return interaction.user.guild_permissions.administrator
+        return app_commands.check(predicate)
+
+    def _load_json(path: str) -> dict:
+        if not os.path.exists(path):
+            return {}
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def save_json(path: str, data):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    mmr_data = _load_json(MMR_FILE)
+    presets = _load_json(PRESETS_FILE)
+    team_history = _load_json(TEAM_HISTORY_FILE)
+    recall_channels = _load_json(RECALL_FILE)
+    team_storage: dict = {}
 
 load_dotenv()
 
@@ -45,8 +124,9 @@ intents.message_content = True
 
 class HaloBot(commands.Bot):
     async def setup_hook(self):
-        await self.load_extension("halo_bot.cogs.orbital")
-        await self.load_extension("halo_bot.cogs.matchmaking")
+        if HAS_HALO_BOT:
+            await self.load_extension("halo_bot.cogs.orbital")
+            await self.load_extension("halo_bot.cogs.matchmaking")
         admin_cmd_names = (
             "recall",
             "teams",
@@ -58,6 +138,13 @@ class HaloBot(commands.Bot):
             "matchmaking",
             "orbital_jump",
             "sync",
+            "leaderboard",
+            "mmr",
+            "compare",
+            "rivals",
+            "stats",
+            "session",
+            "podium",
         )
         for name in admin_cmd_names:
             cmd = self.tree.get_command(name)
@@ -68,6 +155,23 @@ class HaloBot(commands.Bot):
 bot = HaloBot(command_prefix="!", intents=intents)
 
 # None = never auto-delete (team lists, leaderboard)
+GOOGLE_SHEET_XLSX_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1O4Ez5uVnxbFDLooKfwPPxQHyFKq-SnX_s1CklwRP-Ik/export?format=xlsx"
+)
+LOCAL_STATS_FILE = "Collection_of_Stats_across_Halo_Nights.xlsx"
+
+
+class _LegacyCommandShim:
+    """Compatibility shim for older command-binding loops in stale deployments."""
+    def error(self, *_args, **_kwargs):
+        return None
+
+
+# If an older copy of bot.py still references these names directly in a loop,
+# keep startup from crashing with NameError.
+matchmaking = _LegacyCommandShim()
+orbital_jump = _LegacyCommandShim()
 
 def get_emoji(guild: discord.Guild, name: str) -> str:
     if guild:
@@ -84,6 +188,14 @@ def rank_display(mmr: float, guild: discord.Guild, provisional: bool = False) ->
 
 def is_provisional(data: dict) -> bool:
     return data.get("sessions", 0) < PROVISIONAL_SESSIONS
+
+
+def session_sort_key(label: str) -> tuple:
+    text = str(label or "").strip()
+    m = re.search(r"(\d+)", text)
+    if m:
+        return (0, int(m.group(1)))
+    return (1, text.lower())
 
 # ─────────────────────────────────────────────
 # MMR CALCULATION (see halo_bot.pure for normalise / calculate_mmr)
@@ -1124,7 +1236,7 @@ async def teams(interaction: discord.Interaction):
         return
     view = TeamBuilderView(interaction.guild)
     await interaction.response.send_message(
-        view._builder_content(), view=view, ephemeral=True)
+        view._builder_content(), view=view, ephemeral=False)
     view.message = await interaction.original_response()
 
 
@@ -1178,7 +1290,7 @@ async def sub(interaction: discord.Interaction, player_out: str, player_in: str)
 
 
 @bot.tree.command(name="import_mmr",
-    description="[Admin] Import stats from the repo Excel file, or upload a new one.")
+    description="[Admin] Import stats from Google Sheets, or upload a new file.")
 @is_admin()
 async def import_mmr(interaction: discord.Interaction,
                      file: discord.Attachment = None):
@@ -1192,15 +1304,22 @@ async def import_mmr(interaction: discord.Interaction,
                 return
             wb = openpyxl.load_workbook(io.BytesIO(await file.read()))
             source_label = f"uploaded file `{file.filename}`"
-        elif os.path.exists(STATS_FILE):
-            wb = openpyxl.load_workbook(STATS_FILE)
-            source_label = f"`{STATS_FILE}` from repo"
         else:
-            await interaction.followup.send(
-                f"⚠️ No file uploaded and `{STATS_FILE}` not found in the repo.\n"
-                "Commit the Excel file to GitHub or upload it directly.",
-                ephemeral=True)
-            return
+            try:
+                with urlopen(GOOGLE_SHEET_XLSX_URL, timeout=20) as resp:
+                    wb = openpyxl.load_workbook(io.BytesIO(resp.read()))
+                source_label = "Google Sheet"
+            except Exception:
+                if os.path.exists(LOCAL_STATS_FILE):
+                    wb = openpyxl.load_workbook(LOCAL_STATS_FILE)
+                    source_label = f"`{LOCAL_STATS_FILE}` from repo"
+                else:
+                    await interaction.followup.send(
+                        "⚠️ Could not fetch the Google Sheet and no local stats file was found.\n"
+                        "Please upload a `.xlsx` file to `/import_mmr file:` instead.",
+                        ephemeral=True,
+                    )
+                    return
 
         gid = str(interaction.guild_id)
         if gid not in mmr_data:
@@ -1262,19 +1381,21 @@ async def import_mmr(interaction: discord.Interaction,
             for s in sessions_list:
                 if s["session"] not in existing_sessions:
                     new_history.append(s)
+            merged_history = sorted(new_history, key=lambda x: session_sort_key(x.get("session", "")))
             if lb:
                 overall = lb["mmr"]
                 kd, kills, deaths = lb["kd"], lb.get("kills", 0), lb.get("deaths", 0)
                 points, obj_time  = lb["points"], lb["obj_time"]
                 assists, captures = lb["assists"], lb["captures"]
                 session_count     = lb["sessions"]
-            elif sessions_list:
-                overall = round(sum(s["mmr"] for s in sessions_list) / len(sessions_list), 1)
-                last    = sessions_list[-1]
+            elif merged_history:
+                overall = round(sum(s["mmr"] for s in merged_history) / len(merged_history), 1)
+                last    = merged_history[-1]
                 kd, kills = last["kd"], last.get("kills", 0)
                 deaths    = last.get("deaths", 0)
-                points, obj_time, assists, captures = last["points"], 0, 0, 0
-                session_count = len(sessions_list)
+                points, obj_time = last["points"], last.get("obj_time", 0)
+                assists, captures = last.get("assists", 0), last.get("captures", 0)
+                session_count = len(merged_history)
             else:
                 continue
             gamertag = lb.get("gamertag", "") if lb else ""
@@ -1282,7 +1403,7 @@ async def import_mmr(interaction: discord.Interaction,
                 "mmr": overall, "kd": kd, "kills": kills, "deaths": deaths,
                 "points": points, "obj_time": obj_time, "assists": assists,
                 "captures": captures, "sessions": session_count,
-                "gamertag": gamertag, "history": new_history,
+                "gamertag": gamertag, "history": merged_history,
             }
             imported.append((cname, overall, session_count))
 
@@ -1307,7 +1428,8 @@ async def import_mmr(interaction: discord.Interaction,
 
 
 @bot.tree.command(name="leaderboard",
-    description="Show the Halo Reach MMR leaderboard.")
+    description="[Admin] Show the Halo Reach MMR leaderboard.")
+@is_admin()
 async def leaderboard(interaction: discord.Interaction):
     gmmr = get_guild_mmr(interaction.guild_id)
     if not gmmr:
@@ -1315,35 +1437,39 @@ async def leaderboard(interaction: discord.Interaction):
             "⚠️ No MMR data yet. An admin needs to run `/import_mmr` first.",
             ephemeral=True)
         return
-    await interaction.response.defer()
     sorted_players = sorted(gmmr.items(), key=lambda x: x[1].get("mmr", 0), reverse=True)
-    rank_groups: OrderedDict = OrderedDict()
+
+    entries = []
     for pos, (name, data) in enumerate(sorted_players, 1):
-        mmr      = data.get("mmr", 0)
+        mmr = data.get("mmr", 0)
         sessions = data.get("sessions", 0)
         rname, ename = halo_rank(mmr)
-        prov     = "*" if sessions < PROVISIONAL_SESSIONS else ""
-        gamertag = data.get("gamertag", "")
-        gt_part  = f" {gamertag}" if gamertag else ""
-        entry    = f"  `#{pos}` **{name}**{prov}{gt_part} — {mmr} MMR"
-        if rname not in rank_groups:
-            rank_groups[rname] = {"ename": ename, "entries": []}
-        rank_groups[rname]["entries"].append(entry)
-    lines = []
-    for rname, group in rank_groups.items():
-        remoji = get_emoji(interaction.guild, group["ename"])
-        lines.append(f"{remoji} **{rname}**")
-        lines.extend(group["entries"])
-    header = (
-        f"🏆 **Halo Night MMR Leaderboard**\n"
-        f"_* = Provisional (fewer than {PROVISIONAL_SESSIONS} sessions)_\n"
+        remoji = get_emoji(interaction.guild, ename)
+        prov = "*" if sessions < PROVISIONAL_SESSIONS else ""
+        entries.append(f"`#{pos:>2}` {remoji} **{name}**{prov} — **{mmr}**")
+
+    mid = (len(entries) + 1) // 2
+    col1 = "\n".join(entries[:mid]) if entries[:mid] else "_No data_"
+    col2 = "\n".join(entries[mid:]) if entries[mid:] else "_—_"
+
+    if len(col1) > 1024:
+        col1 = col1[:1000] + "\n…"
+    if len(col2) > 1024:
+        col2 = col2[:1000] + "\n…"
+
+    embed = discord.Embed(
+        title="🏆 Halo Night MMR Leaderboard",
+        description=f"_* = Provisional (fewer than {PROVISIONAL_SESSIONS} sessions)_",
+        color=0x5865F2,
     )
-    # Leaderboard — no timeout (persistent public message)
-    await send_single_or_chunked(interaction, lines, header=header, ephemeral=False)
+    embed.add_field(name="Column 1", value=col1, inline=True)
+    embed.add_field(name="Column 2", value=col2, inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=False)
 
 
 @bot.tree.command(name="mmr",
-    description="Look up a player's MMR, rank, and session history.")
+    description="[Admin] Look up a player's MMR, rank, and session history.")
+@is_admin()
 async def mmr_lookup(interaction: discord.Interaction, player: str):
     gmmr  = get_guild_mmr(interaction.guild_id)
     match = next((v for k, v in gmmr.items() if k.lower() == player.lower()), None)
@@ -1434,7 +1560,8 @@ async def rank(interaction: discord.Interaction):
     await send_minimal(interaction, msg, ephemeral=True, timeout=TIMEOUT_STAT)
 
 
-@bot.tree.command(name="compare", description="Compare 2 to 4 players side by side.")
+@bot.tree.command(name="compare", description="[Admin] Compare 2 to 4 players side by side.")
+@is_admin()
 async def compare(interaction: discord.Interaction,
                   player1: str, player2: str,
                   player3: str = None, player4: str = None):
@@ -1509,7 +1636,8 @@ async def compare(interaction: discord.Interaction,
 
 
 @bot.tree.command(name="rivals",
-    description="Head-to-head session history between two players.")
+    description="[Admin] Head-to-head session history between two players.")
+@is_admin()
 async def rivals(interaction: discord.Interaction, player1: str, player2: str):
     gmmr = get_guild_mmr(interaction.guild_id)
     d1   = next((v for k, v in gmmr.items() if k.lower() == player1.lower()), None)
@@ -1557,7 +1685,8 @@ async def rivals(interaction: discord.Interaction, player1: str, player2: str):
     await send_single_or_chunked(interaction, lines, ephemeral=False, timeout=TIMEOUT_STAT)
 
 
-@bot.tree.command(name="stats", description="Show top performers by stat category.")
+@bot.tree.command(name="stats", description="[Admin] Show top performers by stat category.")
+@is_admin()
 async def stats(interaction: discord.Interaction):
     gmmr = get_guild_mmr(interaction.guild_id)
     if not gmmr:
@@ -1589,7 +1718,8 @@ async def stats(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="session",
-    description="Look up a player's stats from a specific session number.")
+    description="[Admin] Look up a player's stats from a specific session number.")
+@is_admin()
 async def session_lookup(interaction: discord.Interaction, number: int, player: str):
     gmmr  = get_guild_mmr(interaction.guild_id)
     match = next((v for k, v in gmmr.items() if k.lower() == player.lower()), None)
@@ -1692,7 +1822,8 @@ async def view_history(interaction: discord.Interaction):
         view=TeamHistoryView(interaction.guild), ephemeral=True)
 
 
-@bot.tree.command(name="podium", description="Show 🥇🥈🥉 top 3 in every stat category.")
+@bot.tree.command(name="podium", description="[Admin] Show 🥇🥈🥉 top 3 in every stat category.")
+@is_admin()
 async def podium(interaction: discord.Interaction):
     gmmr = get_guild_mmr(interaction.guild_id)
     if not gmmr:
@@ -1731,6 +1862,32 @@ async def podium(interaction: discord.Interaction):
         lines.append("")
 
     await send_single_or_chunked(interaction, lines, ephemeral=False, timeout=TIMEOUT_STAT)
+
+
+@bot.tree.command(
+    name="mmr_hub",
+    description="Open a one-command MMR/stats interface with buttons.")
+async def mmr_hub(interaction: discord.Interaction):
+    handlers = {
+        "leaderboard": lambda inter: leaderboard.callback(inter),
+        "mmr": lambda inter, player: mmr_lookup.callback(inter, player),
+        "compare": lambda inter, players: compare.callback(
+            inter,
+            players[0],
+            players[1],
+            players[2] if len(players) > 2 else None,
+            players[3] if len(players) > 3 else None,
+        ),
+        "rivals": lambda inter, p1, p2: rivals.callback(inter, p1, p2),
+        "session": lambda inter, number, player: session_lookup.callback(inter, number, player),
+        "podium": lambda inter: podium.callback(inter),
+        "stats": lambda inter: stats.callback(inter),
+    }
+    await interaction.response.send_message(
+        "📘 **MMR & Stats Interface** — use the buttons below:",
+        view=MMRHubView(handlers),
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="help", description="List all available commands.")

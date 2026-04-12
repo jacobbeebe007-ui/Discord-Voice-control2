@@ -40,7 +40,13 @@ def canonical_name(raw: str) -> str:
     return raw.split("(")[0].strip()
 
 
-WEIGHTS = {"kd": 0.30, "points": 0.25, "obj_time": 0.25, "assists": 0.15, "captures": 0.05}
+WEIGHTS = {
+    "points": 0.40,
+    "kills": 0.30,
+    "kd": 0.10,
+    "kda": 0.10,
+    "objective": 0.10,
+}
 
 
 def normalise(values: list) -> list:
@@ -51,8 +57,14 @@ def normalise(values: list) -> list:
 
 
 def calculate_mmr(players: list) -> list:
+    for p in players:
+        kills = float(p.get("kills", 0) or 0)
+        assists = float(p.get("assists", 0) or 0)
+        deaths = max(float(p.get("deaths", 0) or 0), 1.0)
+        p["kda"] = (kills + assists) / deaths
+        p["objective"] = float(p.get("obj_time", 0) or 0) + (float(p.get("captures", 0) or 0) * 100.0)
     keys = list(WEIGHTS.keys())
-    normed = {k: normalise([p[k] for p in players]) for k in keys}
+    normed = {k: normalise([float(p.get(k, 0) or 0) for p in players]) for k in keys}
     for i, p in enumerate(players):
         p["mmr"] = round(sum(normed[k][i] * WEIGHTS[k] for k in keys), 1)
     return players
