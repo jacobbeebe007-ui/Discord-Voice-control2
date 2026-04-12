@@ -159,6 +159,18 @@ GOOGLE_SHEET_XLSX_URL = (
     "1O4Ez5uVnxbFDLooKfwPPxQHyFKq-SnX_s1CklwRP-Ik/export?format=xlsx"
 )
 
+
+class _LegacyCommandShim:
+    """Compatibility shim for older command-binding loops in stale deployments."""
+    def error(self, *_args, **_kwargs):
+        return None
+
+
+# If an older copy of bot.py still references these names directly in a loop,
+# keep startup from crashing with NameError.
+matchmaking = _LegacyCommandShim()
+orbital_jump = _LegacyCommandShim()
+
 def get_emoji(guild: discord.Guild, name: str) -> str:
     if guild:
         e = discord.utils.get(guild.emojis, name=name)
