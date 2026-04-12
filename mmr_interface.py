@@ -87,47 +87,35 @@ class _SessionModal(discord.ui.Modal, title="Session Lookup"):
         await self.handler(interaction, session_num, str(self.player.value).strip())
 
 
-class _MMRHubSelect(discord.ui.Select):
-    def __init__(self, parent: "MMRHubView"):
-        options = [
-            discord.SelectOption(label="Leaderboard", value="leaderboard", emoji="🏆"),
-            discord.SelectOption(label="MMR Lookup", value="mmr", emoji="🔎"),
-            discord.SelectOption(label="Compare", value="compare", emoji="🆚"),
-            discord.SelectOption(label="Rivals", value="rivals", emoji="⚔️"),
-            discord.SelectOption(label="Session", value="session", emoji="🗂️"),
-            discord.SelectOption(label="Podium", value="podium", emoji="🥇"),
-            discord.SelectOption(label="Stats Leaders", value="stats", emoji="📊"),
-        ]
-        super().__init__(
-            placeholder="Choose a stats/MMR action…",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=0,
-        )
-        self.parent_view = parent
-
-    async def callback(self, interaction: discord.Interaction):
-        key = self.values[0]
-        handlers = self.parent_view.handlers
-        if key == "leaderboard":
-            await handlers["leaderboard"](interaction)
-        elif key == "mmr":
-            await interaction.response.send_modal(_MMRPlayerModal(handlers["mmr"]))
-        elif key == "compare":
-            await interaction.response.send_modal(_CompareModal(handlers["compare"]))
-        elif key == "rivals":
-            await interaction.response.send_modal(_RivalsModal(handlers["rivals"]))
-        elif key == "session":
-            await interaction.response.send_modal(_SessionModal(handlers["session"]))
-        elif key == "podium":
-            await handlers["podium"](interaction)
-        elif key == "stats":
-            await handlers["stats"](interaction)
-
-
 class MMRHubView(discord.ui.View):
     def __init__(self, handlers: dict):
         super().__init__(timeout=None)
         self.handlers = handlers
-        self.add_item(_MMRHubSelect(self))
+
+    @discord.ui.button(label="🏆 Leaderboard", style=discord.ButtonStyle.secondary, row=0)
+    async def leaderboard(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.handlers["leaderboard"](interaction)
+
+    @discord.ui.button(label="🔎 MMR", style=discord.ButtonStyle.secondary, row=0)
+    async def mmr_lookup(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(_MMRPlayerModal(self.handlers["mmr"]))
+
+    @discord.ui.button(label="🆚 Compare", style=discord.ButtonStyle.secondary, row=0)
+    async def compare(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(_CompareModal(self.handlers["compare"]))
+
+    @discord.ui.button(label="⚔️ Rivals", style=discord.ButtonStyle.secondary, row=0)
+    async def rivals(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(_RivalsModal(self.handlers["rivals"]))
+
+    @discord.ui.button(label="🗂️ Session", style=discord.ButtonStyle.secondary, row=1)
+    async def session(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(_SessionModal(self.handlers["session"]))
+
+    @discord.ui.button(label="🥇 Podium", style=discord.ButtonStyle.secondary, row=1)
+    async def podium(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.handlers["podium"](interaction)
+
+    @discord.ui.button(label="📊 Stats", style=discord.ButtonStyle.primary, row=1)
+    async def stats(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self.handlers["stats"](interaction)

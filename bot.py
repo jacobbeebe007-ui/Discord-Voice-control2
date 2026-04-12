@@ -6,6 +6,22 @@ import json, os, random, io, datetime
 from dotenv import load_dotenv
 from mmr_interface import MMRHubView
 
+from halo_bot.checks import is_admin
+from halo_bot.constants import PROVISIONAL_SESSIONS, STATS_FILE, TIMEOUT_MENU, TIMEOUT_STAT
+from halo_bot.pure import calculate_mmr, canonical_name, halo_rank, normalise
+from halo_bot.storage import (
+    MMR_FILE,
+    PRESETS_FILE,
+    RECALL_FILE,
+    TEAM_HISTORY_FILE,
+    mmr_data,
+    presets,
+    recall_channels,
+    save_json,
+    team_history,
+    team_storage,
+)
+
 load_dotenv()
 
 # ─────────────────────────────────────────────
@@ -22,13 +38,33 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-MMR_FILE          = "mmr_data.json"
-PRESETS_FILE      = "presets.json"
-TEAM_HISTORY_FILE = "team_history.json"
-RECALL_FILE       = "recall_channels.json"
-ORBITAL_FILE      = "orbital_jump.json"
-STATS_FILE        = "Collection_of_Stats_across_Halo_Nights.xlsx"
-PROVISIONAL_SESSIONS = 3
+class HaloBot(commands.Bot):
+    async def setup_hook(self):
+        await self.load_extension("halo_bot.cogs.orbital")
+        await self.load_extension("halo_bot.cogs.matchmaking")
+        admin_cmd_names = (
+            "recall",
+            "teams",
+            "sub",
+            "import_mmr",
+            "export",
+            "presets",
+            "history",
+            "matchmaking",
+            "orbital_jump",
+            "sync",
+            "leaderboard",
+            "mmr",
+            "compare",
+            "rivals",
+            "stats",
+            "session",
+            "podium",
+        )
+        for name in admin_cmd_names:
+            cmd = self.tree.get_command(name)
+            if cmd:
+                cmd.error(_admin_error)
 
 # Message timeout constants (seconds)
 TIMEOUT_STAT = 180   # stat lookups — 3 minutes
@@ -1708,19 +1744,21 @@ async def import_mmr(interaction: discord.Interaction,
             for s in sessions_list:
                 if s["session"] not in existing_sessions:
                     new_history.append(s)
+            merged_history = sorted(new_history, key=lambda x: normalise(x.get("session", "")))
             if lb:
                 overall = lb["mmr"]
                 kd, kills, deaths = lb["kd"], lb.get("kills", 0), lb.get("deaths", 0)
                 points, obj_time  = lb["points"], lb["obj_time"]
                 assists, captures = lb["assists"], lb["captures"]
                 session_count     = lb["sessions"]
-            elif sessions_list:
-                overall = round(sum(s["mmr"] for s in sessions_list) / len(sessions_list), 1)
-                last    = sessions_list[-1]
+            elif merged_history:
+                overall = round(sum(s["mmr"] for s in merged_history) / len(merged_history), 1)
+                last    = merged_history[-1]
                 kd, kills = last["kd"], last.get("kills", 0)
                 deaths    = last.get("deaths", 0)
-                points, obj_time, assists, captures = last["points"], 0, 0, 0
-                session_count = len(sessions_list)
+                points, obj_time = last["points"], last.get("obj_time", 0)
+                assists, captures = last.get("assists", 0), last.get("captures", 0)
+                session_count = len(merged_history)
             else:
                 continue
             gamertag = lb.get("gamertag", "") if lb else ""
@@ -1728,7 +1766,7 @@ async def import_mmr(interaction: discord.Interaction,
                 "mmr": overall, "kd": kd, "kills": kills, "deaths": deaths,
                 "points": points, "obj_time": obj_time, "assists": assists,
                 "captures": captures, "sessions": session_count,
-                "gamertag": gamertag, "history": new_history,
+                "gamertag": gamertag, "history": merged_history,
             }
             imported.append((cname, overall, session_count))
 
@@ -1753,7 +1791,8 @@ async def import_mmr(interaction: discord.Interaction,
 
 
 @bot.tree.command(name="leaderboard",
-    description="Show the Halo Reach MMR leaderboard.")
+    description="[Admin] Show the Halo Reach MMR leaderboard.")
+@is_admin()
 async def leaderboard(interaction: discord.Interaction):
     gmmr = get_guild_mmr(interaction.guild_id)
     if not gmmr:
@@ -1789,7 +1828,8 @@ async def leaderboard(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="mmr",
-    description="Look up a player's MMR, rank, and session history.")
+    description="[Admin] Look up a player's MMR, rank, and session history.")
+@is_admin()
 async def mmr_lookup(interaction: discord.Interaction, player: str):
     gmmr  = get_guild_mmr(interaction.guild_id)
     match = next((v for k, v in gmmr.items() if k.lower() == player.lower()), None)
@@ -1880,7 +1920,8 @@ async def rank(interaction: discord.Interaction):
     await send_minimal(interaction, msg, ephemeral=True, timeout=TIMEOUT_STAT)
 
 
-@bot.tree.command(name="compare", description="Compare 2 to 4 players side by side.")
+@bot.tree.command(name="compare", description="[Admin] Compare 2 to 4 players side by side.")
+@is_admin()
 async def compare(interaction: discord.Interaction,
                   player1: str, player2: str,
                   player3: str = None, player4: str = None):
@@ -1955,7 +1996,8 @@ async def compare(interaction: discord.Interaction,
 
 
 @bot.tree.command(name="rivals",
-    description="Head-to-head session history between two players.")
+    description="[Admin] Head-to-head session history between two players.")
+@is_admin()
 async def rivals(interaction: discord.Interaction, player1: str, player2: str):
     gmmr = get_guild_mmr(interaction.guild_id)
     d1   = next((v for k, v in gmmr.items() if k.lower() == player1.lower()), None)
@@ -2003,7 +2045,8 @@ async def rivals(interaction: discord.Interaction, player1: str, player2: str):
     await send_single_or_chunked(interaction, lines, ephemeral=False, timeout=TIMEOUT_STAT)
 
 
-@bot.tree.command(name="stats", description="Show top performers by stat category.")
+@bot.tree.command(name="stats", description="[Admin] Show top performers by stat category.")
+@is_admin()
 async def stats(interaction: discord.Interaction):
     gmmr = get_guild_mmr(interaction.guild_id)
     if not gmmr:
@@ -2035,7 +2078,8 @@ async def stats(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="session",
-    description="Look up a player's stats from a specific session number.")
+    description="[Admin] Look up a player's stats from a specific session number.")
+@is_admin()
 async def session_lookup(interaction: discord.Interaction, number: int, player: str):
     gmmr  = get_guild_mmr(interaction.guild_id)
     match = next((v for k, v in gmmr.items() if k.lower() == player.lower()), None)
@@ -2138,33 +2182,8 @@ async def view_history(interaction: discord.Interaction):
         view=TeamHistoryView(interaction.guild), ephemeral=True)
 
 
-@bot.tree.command(name="matchmaking",
-    description="[Admin] Roll Halo 3 maps, game types and teams for your night.")
+@bot.tree.command(name="podium", description="[Admin] Show 🥇🥈🥉 top 3 in every stat category.")
 @is_admin()
-async def matchmaking(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        "🎮 **Halo 3 Matchmaking** — set options then choose a mode:",
-        view=MatchmakingMenuView(), ephemeral=True)
-
-
-@bot.tree.command(name="orbital_jump",
-    description="[Admin] Manage the Halo 3 Orbital Jump approval roster (0/16).")
-@is_admin()
-async def orbital_jump(interaction: discord.Interaction):
-    state = get_orbital_state(interaction.guild_id)
-    state["approved"] = state.get("approved", [])[:ORBITAL_MAX_SLOTS]
-    save_orbital_state()
-    view = OrbitalJumpView(interaction.guild)
-    await interaction.response.send_message(
-        "🛰️ **Orbital Jump Control** — Admins can manage approvals with the panel below.",
-        embed=orbital_embed(interaction.guild),
-        view=view,
-        ephemeral=False,
-    )
-    view.message = await interaction.original_response()
-
-
-@bot.tree.command(name="podium", description="Show 🥇🥈🥉 top 3 in every stat category.")
 async def podium(interaction: discord.Interaction):
     gmmr = get_guild_mmr(interaction.guild_id)
     if not gmmr:
@@ -2207,7 +2226,7 @@ async def podium(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="mmr_hub",
-    description="Open a one-command MMR/stats interface with a dropdown menu.")
+    description="Open a one-command MMR/stats interface with buttons.")
 async def mmr_hub(interaction: discord.Interaction):
     handlers = {
         "leaderboard": lambda inter: leaderboard.callback(inter),
@@ -2225,7 +2244,7 @@ async def mmr_hub(interaction: discord.Interaction):
         "stats": lambda inter: stats.callback(inter),
     }
     await interaction.response.send_message(
-        "📘 **MMR & Stats Interface** — select an action from the dropdown:",
+        "📘 **MMR & Stats Interface** — use the buttons below:",
         view=MMRHubView(handlers),
         ephemeral=True,
     )
