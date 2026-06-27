@@ -652,6 +652,18 @@ async def send_minimal(interaction: discord.Interaction, content: str,
     await _attach_timeout(view, interaction, ephemeral)
 
 
+async def respond_interaction_error(interaction: discord.Interaction, error: Exception, context: str):
+    print(f"⚠️ Team Manager interaction error in {context}: {error!r}")
+    message = "⚠️ Team Manager hit an error. Check the bot logs for details."
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except Exception as followup_error:
+        print(f"⚠️ Failed to report Team Manager error: {followup_error!r}")
+
+
 async def followup_minimal(interaction: discord.Interaction, content: str,
                            ephemeral: bool = False, timeout=None):
     view = DismissView(timeout=timeout)
@@ -891,6 +903,9 @@ class RandomiseView(discord.ui.View):
         self.channel_select = RandomChannelSelect(vcs)
         self.add_item(self.channel_select)
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        await respond_interaction_error(interaction, error, "randomise")
+
     @discord.ui.button(label="🎲 Randomise!", style=discord.ButtonStyle.success, row=1)
     async def randomise(self, interaction: discord.Interaction, button: discord.ui.Button):
         selected = self.channel_select.selected_ids
@@ -945,8 +960,9 @@ class RandomChannelSelect(discord.ui.Select):
         options = [discord.SelectOption(label=c.name,
                    description=f"{len(c.members)} connected", value=str(c.id))
                    for c in vcs[:25]]
+        max_values = min(len(options), 25)
         super().__init__(placeholder="Pick 2–25 voice channels...",
-                         options=options, min_values=2, max_values=min(len(vcs), 25), row=0)
+                         options=options, min_values=min(2, max_values), max_values=max_values, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         self.selected_ids = self.values
@@ -966,6 +982,9 @@ class MatchmakeView(discord.ui.View):
         vcs = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
         self.channel_select = MatchmakeChannelSelect(vcs)
         self.add_item(self.channel_select)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        await respond_interaction_error(interaction, error, "mmr-balanced")
 
     @discord.ui.button(label="⚖️ Generate Balanced Teams", style=discord.ButtonStyle.success, row=1)
     async def matchmake(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1028,8 +1047,9 @@ class MatchmakeChannelSelect(discord.ui.Select):
         options = [discord.SelectOption(label=c.name,
                    description=f"{len(c.members)} connected", value=str(c.id))
                    for c in vcs[:25]]
+        max_values = min(len(options), 25)
         super().__init__(placeholder="Pick 2–25 voice channels...",
-                         options=options, min_values=2, max_values=min(len(vcs), 25), row=0)
+                         options=options, min_values=min(2, max_values), max_values=max_values, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         self.selected_ids = self.values
@@ -1322,6 +1342,9 @@ class MemberCategoryPickView(discord.ui.View):
             self.add_item(self._make_cat_select("⚫ Offline / invisible", off, "away", row))
             row += 1
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        await respond_interaction_error(interaction, error, "member-list-picker")
+
     def _make_cat_select(self, placeholder, members, desc_pfx, row):
         opts = _select_options_from_members(members, desc_pfx)
         mx = min(len(opts), 25)
@@ -1387,6 +1410,9 @@ class TeamBuilderToolsView(discord.ui.View):
         super().__init__(timeout=TIMEOUT_MENU)
         self.builder = builder
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        await respond_interaction_error(interaction, error, "manual-tools")
+
     @discord.ui.button(label="🗑️ Clear all team slots", style=discord.ButtonStyle.danger, row=0)
     async def clear_all_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         team_storage.pop(self.builder.guild.id, None)
@@ -1411,6 +1437,9 @@ class TeamsDashboardView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=None)
         self.guild = guild
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        await respond_interaction_error(interaction, error, "team-manager-dashboard")
 
     def content(self) -> str:
         summary = build_team_summary(self.guild, self.guild.id)
@@ -1488,8 +1517,17 @@ class AutoTeamsView(discord.ui.View):
         super().__init__(timeout=TIMEOUT_MENU)
         self.guild = guild
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        await respond_interaction_error(interaction, error, "auto-teams")
+
     @discord.ui.button(label="Random Teams", style=discord.ButtonStyle.primary, row=0)
     async def random_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if len(self.guild.voice_channels) < 2:
+            await interaction.response.send_message(
+                "Need at least two voice channels to randomise teams.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.edit_message(
             content="## Random Teams\nPick the team voice channels, then confirm.",
             view=RandomiseView(self.guild),
@@ -1497,6 +1535,12 @@ class AutoTeamsView(discord.ui.View):
 
     @discord.ui.button(label="MMR Balanced Teams", style=discord.ButtonStyle.primary, row=0)
     async def mmr_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if len(self.guild.voice_channels) < 2:
+            await interaction.response.send_message(
+                "Need at least two voice channels to generate MMR-balanced teams.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.edit_message(
             content="## MMR Balanced Teams\nPick the team voice channels, then generate.",
             view=MatchmakeView(self.guild),
@@ -1511,6 +1555,9 @@ class SavedTeamsView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=TIMEOUT_MENU)
         self.guild = guild
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        await respond_interaction_error(interaction, error, "presets")
 
     @discord.ui.button(label="Save Current", style=discord.ButtonStyle.success, row=0)
     async def save_current(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1552,6 +1599,9 @@ class TeamBuilderView(discord.ui.View):
         self.user_select = StagingUserSelect(row=1)
         self.add_item(self.channel_select)
         self.add_item(self.user_select)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        await respond_interaction_error(interaction, error, "manual-setup")
 
     async def sync_main_panel(self, content: str = None):
         text = content if content is not None else self._builder_content()
