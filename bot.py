@@ -999,12 +999,10 @@ class TeamHistorySelect(discord.ui.Select):
             content="\n".join(lines), view=self.view)
 
 # ─────────────────────────────────────────────
-# RECALL PICKER (used inside Team Builder)
+# RECALL PICKER
 # ─────────────────────────────────────────────
 class RecallPickerView(discord.ui.View):
-    """Used from team builder 🔁 button.
-    If a lobby is saved: shows a Confirm button.
-    Otherwise: shows a channel picker select."""
+    """Shows confirm/change controls when a lobby is saved, otherwise a channel picker."""
     def __init__(self, guild):
         super().__init__(timeout=TIMEOUT_MENU)
         self.guild = guild
@@ -1202,7 +1200,7 @@ class MemberCategoryPickView(discord.ui.View):
 
 
 class TeamBuilderToolsView(discord.ui.View):
-    """History / recall / clear-all without crowding the main panel."""
+    """History / clear-all without crowding the manual setup panel."""
 
     def __init__(self, builder: "TeamBuilderView"):
         super().__init__(timeout=TIMEOUT_MENU)
@@ -1237,17 +1235,12 @@ class TeamsDashboardView(discord.ui.View):
         summary = build_team_summary(self.guild, self.guild.id)
         return (
             "## Team Manager\n"
-            "Choose a section below. Setup tools open privately for admins; final team and match results still post publicly.\n\n"
-            "**Manual Teams** - allocate specific players to voice channels.\n"
-            "**Auto Teams** - randomise or MMR-balance players in voice.\n"
-            "**Saved Teams** - save, load, or review previous team setups.\n"
-            "**Voice Tools** - send assigned teams or clear slots.\n"
-            "**Recall** - move everyone back to the saved lobby.\n"
-            "**Match Setup** - roll Halo 3 maps and game types.\n\n"
+            "Use the buttons below to set up, send, or recall teams.\n\n"
+            "**Current Assignments**\n"
             f"{summary}"
         )
 
-    @discord.ui.button(label="Manual Teams", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Manual Setup", style=discord.ButtonStyle.primary, row=0)
     async def manual_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = TeamBuilderView(self.guild)
         await interaction.response.send_message(view._builder_content(), view=view, ephemeral=True)
@@ -1256,24 +1249,43 @@ class TeamsDashboardView(discord.ui.View):
     @discord.ui.button(label="Auto Teams", style=discord.ButtonStyle.primary, row=0)
     async def auto_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            "## Auto Teams\nChoose random teams or MMR-balanced teams. Both use players currently in voice.",
+            "## Auto Teams\nChoose how to split everyone currently in voice.",
             view=AutoTeamsView(self.guild),
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Saved Teams", style=discord.ButtonStyle.secondary, row=1)
-    async def saved_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "## Saved Teams\nSave the current assignments, load presets, or review recent team history.",
-            view=SavedTeamsView(self.guild),
-            ephemeral=True,
+    @discord.ui.button(label="Send Teams", style=discord.ButtonStyle.success, row=1)
+    async def send_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gid = self.guild.id
+        teams = team_storage.get(gid, {})
+        if not teams:
+            await interaction.response.send_message("No teams assigned yet.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        results = await move_team_members(self.guild, teams)
+        save_team_to_history(gid, self.guild)
+        await interaction.followup.send(
+            "## Teams Dispatched\n" + "\n".join(results),
+            view=DismissView(),
+            ephemeral=False,
         )
 
-    @discord.ui.button(label="Voice Tools", style=discord.ButtonStyle.success, row=1)
-    async def voice_tools(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Recall Lobby", style=discord.ButtonStyle.success, row=1)
+    async def recall_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
+        saved_id = recall_channels.get(str(self.guild.id))
+        saved = self.guild.get_channel(saved_id) if saved_id else None
+        msg = (
+            f"## Recall\nLobby is **{saved.name}**."
+            if saved
+            else "## Recall\nPick a lobby channel:"
+        )
+        await interaction.response.send_message(msg, view=RecallPickerView(self.guild), ephemeral=True)
+
+    @discord.ui.button(label="Presets", style=discord.ButtonStyle.secondary, row=2)
+    async def saved_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            "## Voice Tools\nSend assigned teams to voice or clear current slots. Use the dashboard Recall button for lobby recall.",
-            view=VoiceToolsView(self.guild),
+            "## Presets\nSave the current teams, load a preset, or review history.",
+            view=SavedTeamsView(self.guild),
             ephemeral=True,
         )
 
@@ -1285,18 +1297,7 @@ class TeamsDashboardView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Recall", style=discord.ButtonStyle.success, row=2)
-    async def recall_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
-        saved_id = recall_channels.get(str(self.guild.id))
-        saved = self.guild.get_channel(saved_id) if saved_id else None
-        msg = (
-            f"## Recall\nLobby is **{saved.name}**."
-            if saved
-            else "## Recall\nPick a lobby channel:"
-        )
-        await interaction.response.send_message(msg, view=RecallPickerView(self.guild), ephemeral=True)
-
-    @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=3)
     async def refresh_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content=self.content(), view=self)
 
@@ -1309,14 +1310,14 @@ class AutoTeamsView(discord.ui.View):
     @discord.ui.button(label="Random Teams", style=discord.ButtonStyle.primary, row=0)
     async def random_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="## Random Teams\nPick 2-25 voice channels, then confirm.",
+            content="## Random Teams\nPick the team voice channels, then confirm.",
             view=RandomiseView(self.guild),
         )
 
     @discord.ui.button(label="MMR Balanced Teams", style=discord.ButtonStyle.primary, row=0)
     async def mmr_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            content="## MMR-Balanced Teams\nPick channels to fill from players currently in voice.",
+            content="## MMR Balanced Teams\nPick the team voice channels, then generate.",
             view=MatchmakeView(self.guild),
         )
 
@@ -1340,7 +1341,7 @@ class SavedTeamsView(discord.ui.View):
             await interaction.response.send_message("No presets saved yet.", ephemeral=True)
             return
         await interaction.response.edit_message(
-            content="## Load Preset\nSelect a saved lineup:",
+            content="## Load Preset\nChoose a saved team setup.",
             view=TeamPresetsView(self.guild),
         )
 
@@ -1350,58 +1351,13 @@ class SavedTeamsView(discord.ui.View):
             await interaction.response.send_message("No team history yet.", ephemeral=True)
             return
         await interaction.response.edit_message(
-            content="## Team History\nSelect an entry to preview:",
+            content="## Team History\nChoose a recent setup to preview.",
             view=TeamHistoryView(self.guild),
         )
 
     @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, row=1)
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content="Closed.", view=None)
-
-
-class VoiceToolsView(discord.ui.View):
-    def __init__(self, guild: discord.Guild):
-        super().__init__(timeout=TIMEOUT_MENU)
-        self.guild = guild
-
-    @discord.ui.button(label="Send Teams", style=discord.ButtonStyle.success, row=0)
-    async def send_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
-        gid = self.guild.id
-        teams = team_storage.get(gid, {})
-        if not teams:
-            await interaction.response.edit_message(content="No teams assigned yet.", view=self)
-            return
-        await interaction.response.defer()
-        results = await move_team_members(self.guild, teams)
-        save_team_to_history(gid, self.guild)
-        await interaction.followup.send(
-            "## Teams dispatched\n" + "\n".join(results),
-            view=DismissView(),
-            ephemeral=False,
-        )
-
-    @discord.ui.button(label="Show Teams", style=discord.ButtonStyle.secondary, row=0)
-    async def show_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            content="## Current Teams\n" + build_team_summary(self.guild, self.guild.id),
-            view=self,
-        )
-
-    @discord.ui.button(label="Recall Lobby", style=discord.ButtonStyle.secondary, row=1)
-    async def recall_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
-        saved_id = recall_channels.get(str(self.guild.id))
-        saved = self.guild.get_channel(saved_id) if saved_id else None
-        msg = (
-            f"## Recall\nLobby is **{saved.name}**."
-            if saved
-            else "## Recall\nPick a lobby channel:"
-        )
-        await interaction.response.edit_message(content=msg, view=RecallPickerView(self.guild))
-
-    @discord.ui.button(label="Clear All Slots", style=discord.ButtonStyle.danger, row=1)
-    async def clear_all(self, interaction: discord.Interaction, button: discord.ui.Button):
-        team_storage.pop(self.guild.id, None)
-        await interaction.response.edit_message(content="Cleared every team slot.", view=None)
 
 
 class TeamBuilderView(discord.ui.View):
@@ -1446,13 +1402,9 @@ class TeamBuilderView(discord.ui.View):
             "## 👥 Manual Team Builder\n"
             f"{self._staged_line()}\n"
             f"**Target channel:** {ch_name}\n"
-            "—\n"
-            "**Flow:** (1) voice channel · (2) add people · (3) **➕ Assign**\n"
-            "· **📂 From lists** — multiselect 🎙️ voice / 🟢 online / ⚫ offline\n"
-            "· **🔊 +All in voice** — stage everyone currently in a voice channel\n"
+            "**Next:** choose a channel, stage players, then press **Assign**.\n"
             f"**Lobby:** {lobby}\n"
-            "—\n"
-            "Use `/teammanager` for auto teams, saved teams, voice tools, recall, and match setup."
+            "\nUse `/teammanager` to send teams, recall lobby, use presets, or roll matches."
         )
         if status:
             base += f"\n\n{status}"
