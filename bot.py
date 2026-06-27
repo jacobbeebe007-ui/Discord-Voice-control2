@@ -133,7 +133,7 @@ DEFAULT_GOOGLE_SHEET_XLSX_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1O4Ez5uVnxbFDLooKfwPPxQHyFKq-SnX_s1CklwRP-Ik/export?format=xlsx"
 )
-LOCAL_STATS_FILE = "Collection_of_Stats_across_Halo_Nights.xlsx"
+LOCAL_STATS_FILE = "Collection of Stats across Halo Nights.xlsx"
 
 
 def _google_sheet_export_url(url: str) -> str:
@@ -236,23 +236,23 @@ def session_sort_key(label: str) -> tuple:
     return (1, text.lower())
 
 
-def session_display_score(entry: dict):
+def session_display_mmr(entry: dict):
     for key in ("performance_score", "stat_score", "mmr"):
         value = entry.get(key)
         if value is None:
             continue
         try:
-            return round(float(value), 1)
+            return migrate_mmr_value(value)
         except (TypeError, ValueError):
             continue
     return None
 
 
-def format_session_score(entry: dict) -> str:
-    score = session_display_score(entry)
-    if score is None:
+def format_session_mmr(entry: dict) -> str:
+    mmr = session_display_mmr(entry)
+    if mmr is None:
         return "?"
-    return f"{score:g}"
+    return f"{mmr:g}"
 
 # ─────────────────────────────────────────────
 # MMR CALCULATION
@@ -293,6 +293,14 @@ def migrate_player_data(data: dict) -> dict:
 
 def header_key(value) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def header_index(headers: list, *aliases: str):
+    keys = {header_key(alias) for alias in aliases}
+    for idx, header in enumerate(headers):
+        if header_key(header) in keys:
+            return idx
+    return None
 
 
 def find_placement_columns(headers: list) -> dict:
@@ -395,24 +403,54 @@ def parse_leaderboard_sheet(ws) -> list:
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
         return []
+    headers = list(rows[0])
+    columns = {
+        "name": header_index(headers, "Player Name", "Name", "Spartan"),
+        "gamertag": header_index(headers, "Gamertag / Alias", "Gamertag", "Alias"),
+        "kills": header_index(headers, "Total Kills", "Kills"),
+        "assists": header_index(headers, "Total Assists", "Assists"),
+        "deaths": header_index(headers, "Total Deaths", "Deaths"),
+        "kd": header_index(headers, "K/D Ratio", "KD Ratio", "K/D"),
+        "obj_time": header_index(headers, "Time in Obj (sec)", "Time in Objective", "Time in objective /Seconds", "Obj Time"),
+        "captures": header_index(headers, "Captures", "Total Captures"),
+        "points": header_index(headers, "Total Points", "Points"),
+        "sessions": header_index(headers, "Sessions", "Session Count"),
+    }
+
+    def safe(row, key, default=0.0):
+        idx = columns.get(key)
+        if idx is None or idx >= len(row):
+            return default
+        try:
+            return float(row[idx] or default)
+        except (TypeError, ValueError):
+            return default
+
     players = []
     for row in rows[1:]:
         try:
-            name = str(row[1]).strip() if row[1] else None
+            name_idx = columns["name"]
+            name = str(row[name_idx]).strip() if name_idx is not None and row[name_idx] else None
             if not name or name.lower() == "none":
                 continue
-            gamertag = str(row[2]).strip() if row[2] and str(row[2]).strip().lower() != "none" else ""
+            gt_idx = columns["gamertag"]
+            gamertag = (
+                str(row[gt_idx]).strip()
+                if gt_idx is not None and gt_idx < len(row) and row[gt_idx]
+                and str(row[gt_idx]).strip().lower() != "none"
+                else ""
+            )
             players.append({
                 "name":     name,
                 "gamertag": gamertag,
-                "kills":    float(row[3] or 0),
-                "assists":  float(row[4] or 0),
-                "deaths":   float(row[5] or 0),
-                "kd":       float(row[6] or 0),
-                "obj_time": float(row[7] or 0),
-                "captures": float(row[8] or 0),
-                "points":   float(row[9] or 0),
-                "sessions": int(row[10] or 1),
+                "kills":    safe(row, "kills"),
+                "assists":  safe(row, "assists"),
+                "deaths":   safe(row, "deaths"),
+                "kd":       safe(row, "kd"),
+                "obj_time": safe(row, "obj_time"),
+                "captures": safe(row, "captures"),
+                "points":   safe(row, "points"),
+                "sessions": int(safe(row, "sessions", 1.0)),
             })
         except:
             continue
@@ -2322,20 +2360,22 @@ async def mmr_lookup(interaction: discord.Interaction, player: str):
     history = match.get("history", [])
     if history:
         lines.append("\n📈 **Session Breakdown**")
-        prev_score = None
+        prev_session_mmr = None
         for h in history:
-            score     = session_display_score(h)
-            score_txt = format_session_score(h)
-            s_rank    = h.get("session_rank", "?")
-            s_size    = h.get("session_size", "?")
-            arrow     = ("" if prev_score is None or score is None
-                         else " ▲" if score > prev_score
-                         else " ▼" if score < prev_score else " ─")
+            session_mmr = session_display_mmr(h)
+            session_mmr_txt = format_session_mmr(h)
+            s_rank = h.get("session_rank", "?")
+            s_size = h.get("session_size", "?")
+            h_rname, h_ename = halo_rank(session_mmr or 0)
+            h_remoji = get_emoji(interaction.guild, h_ename)
+            arrow = ("" if prev_session_mmr is None or session_mmr is None
+                     else " ▲" if session_mmr > prev_session_mmr
+                     else " ▼" if session_mmr < prev_session_mmr else " ─")
             lines.append(
-                f"> **{h['session']}**: Session Score **{score_txt}** "
-                f"— #{s_rank}/{s_size}{arrow}")
-            if score is not None:
-                prev_score = score
+                f"> {h_remoji} *{h_rname}* | **{h['session']}**: "
+                f"Session MMR **{session_mmr_txt}** — #{s_rank}/{s_size}{arrow}")
+            if session_mmr is not None:
+                prev_session_mmr = session_mmr
     await send_single_or_chunked(interaction, lines, ephemeral=False, timeout=TIMEOUT_STAT)
 
 
@@ -2390,6 +2430,7 @@ async def explain_mmr(interaction: discord.Interaction):
         "If the session sheet has placement columns from `1st` to `8th`, placements add a small bonus:",
         "`1st 9 pts | 2nd 7 pts | 3rd 5 pts | 4th 3 pts | 5th-8th 1 pt`",
         "`85% stat score + 15% placement score`",
+        "Session breakdowns show that performance on the same **1000+ MMR scale** as the overall rating.",
         "",
         "Each new session compares your performance to what is expected from your MMR versus the lobby average.",
         "The session change is capped between **-500** and **+500** MMR because Halo Nights include multiple games.",
@@ -2498,13 +2539,17 @@ async def rivals(interaction: discord.Interaction, player1: str, player2: str):
     lines = [f"⚔️ **{n1}** vs **{n2}** — {len(shared)} shared session(s)\n"]
     for session in shared:
         s1 = h1[session]; s2 = h2[session]
-        score1 = session_display_score(s1)
-        score2 = session_display_score(s2)
-        score1_txt = format_session_score(s1)
-        score2_txt = format_session_score(s2)
-        if score1 is not None and score2 is not None and score1 > score2:
+        mmr1 = session_display_mmr(s1)
+        mmr2 = session_display_mmr(s2)
+        mmr1_txt = format_session_mmr(s1)
+        mmr2_txt = format_session_mmr(s2)
+        _, e1 = halo_rank(mmr1 or 0)
+        _, e2 = halo_rank(mmr2 or 0)
+        em1 = get_emoji(interaction.guild, e1)
+        em2 = get_emoji(interaction.guild, e2)
+        if mmr1 is not None and mmr2 is not None and mmr1 > mmr2:
             winner = f"→ **{n1}** wins"; p1_wins += 1
-        elif score1 is not None and score2 is not None and score2 > score1:
+        elif mmr1 is not None and mmr2 is not None and mmr2 > mmr1:
             winner = f"→ **{n2}** wins"; p2_wins += 1
         else:
             winner = "→ Draw"; draws += 1
@@ -2512,8 +2557,8 @@ async def rivals(interaction: discord.Interaction, player1: str, player2: str):
         r2 = f"#{s2.get('session_rank','?')}/{s2.get('session_size','?')}"
         lines.append(
             f"**{session}**\n"
-            f"> {n1}: Session Score **{score1_txt}** ({r1})\n"
-            f"> {n2}: Session Score **{score2_txt}** ({r2})\n"
+            f"> {em1} {n1}: Session MMR **{mmr1_txt}** ({r1})\n"
+            f"> {em2} {n2}: Session MMR **{mmr2_txt}** ({r2})\n"
             f"> {winner}")
     lines.append(
         f"\n🏆 **Head-to-head:** {n1} {p1_wins} — {p2_wins} {n2}"
@@ -2568,9 +2613,12 @@ async def session_lookup(interaction: discord.Interaction, number: int, player: 
             f"⚠️ **{name}** has no data for Session {number}.\nAvailable: {available}",
             ephemeral=True)
         return
-    session_score = format_session_score(entry)
+    session_mmr = session_display_mmr(entry)
+    session_mmr_txt = format_session_mmr(entry)
     s_rank = entry.get("session_rank", "?")
     s_size = entry.get("session_size", "?")
+    rname, ename = halo_rank(session_mmr or 0)
+    remoji = get_emoji(interaction.guild, ename)
     kills  = entry.get("kills", "?")
     deaths = entry.get("deaths", "?")
     kd     = entry.get("kd", "?")
@@ -2583,7 +2631,7 @@ async def session_lookup(interaction: discord.Interaction, number: int, player: 
         kda = "?"
     lines = [
         f"**{name}** — {entry['session']}",
-        f"Session Score: **{session_score}** | Session Rank: **#{s_rank}/{s_size}**",
+        f"{remoji} *{rname}* | Session MMR: **{session_mmr_txt}** | Session Rank: **#{s_rank}/{s_size}**",
         f"Kills: {kills} | Deaths: {deaths} | K/D: {kd} | KDA: {kda}",
         f"Assists: {asst} | Points: {points} | Captures: {caps}",
     ]
