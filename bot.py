@@ -235,6 +235,25 @@ def session_sort_key(label: str) -> tuple:
         return (0, int(m.group(1)))
     return (1, text.lower())
 
+
+def session_display_score(entry: dict):
+    for key in ("performance_score", "stat_score", "mmr"):
+        value = entry.get(key)
+        if value is None:
+            continue
+        try:
+            return round(float(value), 1)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def format_session_score(entry: dict) -> str:
+    score = session_display_score(entry)
+    if score is None:
+        return "?"
+    return f"{score:g}"
+
 # ─────────────────────────────────────────────
 # MMR CALCULATION
 # ─────────────────────────────────────────────
@@ -2303,19 +2322,20 @@ async def mmr_lookup(interaction: discord.Interaction, player: str):
     history = match.get("history", [])
     if history:
         lines.append("\n📈 **Session Breakdown**")
-        prev_mmr = None
+        prev_score = None
         for h in history:
-            h_rname, h_ename = halo_rank(h["mmr"])
-            h_remoji  = get_emoji(interaction.guild, h_ename)
+            score     = session_display_score(h)
+            score_txt = format_session_score(h)
             s_rank    = h.get("session_rank", "?")
             s_size    = h.get("session_size", "?")
-            arrow     = ("" if prev_mmr is None
-                         else " ▲" if h["mmr"] > prev_mmr
-                         else " ▼" if h["mmr"] < prev_mmr else " ─")
+            arrow     = ("" if prev_score is None or score is None
+                         else " ▲" if score > prev_score
+                         else " ▼" if score < prev_score else " ─")
             lines.append(
-                f"> {h_remoji} *{h_rname}* | **{h['session']}**: "
-                f"{h['mmr']} MMR — #{s_rank}/{s_size}{arrow}")
-            prev_mmr = h["mmr"]
+                f"> **{h['session']}**: Session Score **{score_txt}** "
+                f"— #{s_rank}/{s_size}{arrow}")
+            if score is not None:
+                prev_score = score
     await send_single_or_chunked(interaction, lines, ephemeral=False, timeout=TIMEOUT_STAT)
 
 
@@ -2478,12 +2498,13 @@ async def rivals(interaction: discord.Interaction, player1: str, player2: str):
     lines = [f"⚔️ **{n1}** vs **{n2}** — {len(shared)} shared session(s)\n"]
     for session in shared:
         s1 = h1[session]; s2 = h2[session]
-        _, e1 = halo_rank(s1["mmr"]); _, e2 = halo_rank(s2["mmr"])
-        em1 = get_emoji(interaction.guild, e1)
-        em2 = get_emoji(interaction.guild, e2)
-        if s1["mmr"] > s2["mmr"]:
+        score1 = session_display_score(s1)
+        score2 = session_display_score(s2)
+        score1_txt = format_session_score(s1)
+        score2_txt = format_session_score(s2)
+        if score1 is not None and score2 is not None and score1 > score2:
             winner = f"→ **{n1}** wins"; p1_wins += 1
-        elif s2["mmr"] > s1["mmr"]:
+        elif score1 is not None and score2 is not None and score2 > score1:
             winner = f"→ **{n2}** wins"; p2_wins += 1
         else:
             winner = "→ Draw"; draws += 1
@@ -2491,8 +2512,8 @@ async def rivals(interaction: discord.Interaction, player1: str, player2: str):
         r2 = f"#{s2.get('session_rank','?')}/{s2.get('session_size','?')}"
         lines.append(
             f"**{session}**\n"
-            f"> {em1} {n1}: {s1['mmr']} MMR ({r1})\n"
-            f"> {em2} {n2}: {s2['mmr']} MMR ({r2})\n"
+            f"> {n1}: Session Score **{score1_txt}** ({r1})\n"
+            f"> {n2}: Session Score **{score2_txt}** ({r2})\n"
             f"> {winner}")
     lines.append(
         f"\n🏆 **Head-to-head:** {n1} {p1_wins} — {p2_wins} {n2}"
@@ -2547,11 +2568,9 @@ async def session_lookup(interaction: discord.Interaction, number: int, player: 
             f"⚠️ **{name}** has no data for Session {number}.\nAvailable: {available}",
             ephemeral=True)
         return
-    mmr    = entry["mmr"]
+    session_score = format_session_score(entry)
     s_rank = entry.get("session_rank", "?")
     s_size = entry.get("session_size", "?")
-    rname, ename = halo_rank(mmr)
-    remoji = get_emoji(interaction.guild, ename)
     kills  = entry.get("kills", "?")
     deaths = entry.get("deaths", "?")
     kd     = entry.get("kd", "?")
@@ -2564,7 +2583,7 @@ async def session_lookup(interaction: discord.Interaction, number: int, player: 
         kda = "?"
     lines = [
         f"**{name}** — {entry['session']}",
-        f"{remoji} *{rname}* | MMR: **{mmr}** | Session Rank: **#{s_rank}/{s_size}**",
+        f"Session Score: **{session_score}** | Session Rank: **#{s_rank}/{s_size}**",
         f"Kills: {kills} | Deaths: {deaths} | K/D: {kd} | KDA: {kda}",
         f"Assists: {asst} | Points: {points} | Captures: {caps}",
     ]

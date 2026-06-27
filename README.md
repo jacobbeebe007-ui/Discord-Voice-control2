@@ -170,6 +170,8 @@ Each stat is normalised 0–100 relative to players in that session. If session 
 performance_score = 85% stat_score + 15% placement_score
 ```
 
+Player lookups show **Overall MMR** as the persistent rating. The session breakdown shows each session's own **Session Score**, which is the 0-100 performance score from that session's stats and placements.
+
 The bot compares the player's performance score to the expected score for their current MMR versus the lobby average. Each session can change MMR by up to **+500** or **-500**.
 
 Players with fewer than 3 sessions are marked as **provisional** with an asterisk `*` and their rank is not yet confirmed.
