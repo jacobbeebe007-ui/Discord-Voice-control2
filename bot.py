@@ -1739,6 +1739,17 @@ class TeamBuilderView(discord.ui.View):
             ephemeral=True,
         )
 
+    @discord.ui.button(label="Recall Lobby", style=discord.ButtonStyle.success, row=4)
+    async def recall_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
+        saved_id = recall_channels.get(str(self.guild.id))
+        saved = self.guild.get_channel(saved_id) if saved_id else None
+        msg = (
+            f"## Recall\nLobby is **{saved.name}**."
+            if saved
+            else "## Recall\nPick a lobby channel:"
+        )
+        await interaction.response.send_message(msg, view=RecallPickerView(self.guild), ephemeral=True)
+
 # ─────────────────────────────────────────────
 # HALO 3 MATCHMAKING
 # ─────────────────────────────────────────────
