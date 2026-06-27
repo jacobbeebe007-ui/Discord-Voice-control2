@@ -117,7 +117,7 @@ class HaloBot(commands.Bot):
             await self.load_extension("halo_bot.cogs.matchmaking")
         admin_cmd_names = (
             "recall",
-            "teams",
+            "teammanager",
             "sub",
             "import_mmr",
             "export",
@@ -1228,19 +1228,6 @@ class TeamBuilderToolsView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="🔁 Recall to lobby", style=discord.ButtonStyle.secondary, row=0)
-    async def open_recall(self, interaction: discord.Interaction, button: discord.ui.Button):
-        saved_id = recall_channels.get(str(self.builder.guild.id))
-        saved = self.builder.guild.get_channel(saved_id) if saved_id else None
-        msg = (
-            f"🔁 **Recall** — lobby is **{saved.name}**"
-            if saved
-            else "🔁 **Recall** — pick a lobby channel:"
-        )
-        await interaction.response.edit_message(content="Sent recall picker ⬇️", view=None)
-        await interaction.followup.send(msg, view=RecallPickerView(self.builder.guild), ephemeral=True)
-
-
 class TeamsDashboardView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=None)
@@ -1249,12 +1236,13 @@ class TeamsDashboardView(discord.ui.View):
     def content(self) -> str:
         summary = build_team_summary(self.guild, self.guild.id)
         return (
-            "## Team Control Panel\n"
+            "## Team Manager\n"
             "Choose a section below. Setup tools open privately for admins; final team and match results still post publicly.\n\n"
             "**Manual Teams** - allocate specific players to voice channels.\n"
             "**Auto Teams** - randomise or MMR-balance players in voice.\n"
             "**Saved Teams** - save, load, or review previous team setups.\n"
-            "**Voice Tools** - send assigned teams, recall to lobby, or clear slots.\n"
+            "**Voice Tools** - send assigned teams or clear slots.\n"
+            "**Recall** - move everyone back to the saved lobby.\n"
             "**Match Setup** - roll Halo 3 maps and game types.\n\n"
             f"{summary}"
         )
@@ -1284,7 +1272,7 @@ class TeamsDashboardView(discord.ui.View):
     @discord.ui.button(label="Voice Tools", style=discord.ButtonStyle.success, row=1)
     async def voice_tools(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            "## Voice Tools\nSend assigned teams to voice, recall everyone to lobby, or clear current slots.",
+            "## Voice Tools\nSend assigned teams to voice or clear current slots. Use the dashboard Recall button for lobby recall.",
             view=VoiceToolsView(self.guild),
             ephemeral=True,
         )
@@ -1297,7 +1285,18 @@ class TeamsDashboardView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Recall", style=discord.ButtonStyle.success, row=2)
+    async def recall_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
+        saved_id = recall_channels.get(str(self.guild.id))
+        saved = self.guild.get_channel(saved_id) if saved_id else None
+        msg = (
+            f"## Recall\nLobby is **{saved.name}**."
+            if saved
+            else "## Recall\nPick a lobby channel:"
+        )
+        await interaction.response.send_message(msg, view=RecallPickerView(self.guild), ephemeral=True)
+
+    @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.secondary, row=3)
     async def refresh_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(content=self.content(), view=self)
 
@@ -1453,7 +1452,7 @@ class TeamBuilderView(discord.ui.View):
             "· **🔊 +All in voice** — stage everyone currently in a voice channel\n"
             f"**Lobby:** {lobby}\n"
             "—\n"
-            "Use the main `/teams` dashboard for auto teams, saved teams, voice tools, and match setup."
+            "Use `/teammanager` for auto teams, saved teams, voice tools, recall, and match setup."
         )
         if status:
             base += f"\n\n{status}"
@@ -1552,7 +1551,7 @@ class TeamBuilderView(discord.ui.View):
     @discord.ui.button(label="⚙️ More", style=discord.ButtonStyle.secondary, row=3)
     async def more_tools(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            "### ⚙️ Team Builder — more",
+            "### ⚙️ Manual Team Tools",
             view=TeamBuilderToolsView(self),
             ephemeral=True,
         )
@@ -2026,10 +2025,10 @@ async def recall(interaction: discord.Interaction, lobby: discord.VoiceChannel):
         view=DismissView(), ephemeral=False)
 
 
-@bot.tree.command(name="teams",
-    description="[Admin] Build teams and send members to voice channels.")
+@bot.tree.command(name="teammanager",
+    description="[Admin] Open the Team Manager dashboard.")
 @is_admin()
-async def teams(interaction: discord.Interaction):
+async def teammanager(interaction: discord.Interaction):
     if not [c for c in interaction.guild.channels if isinstance(c, discord.VoiceChannel)]:
         await interaction.response.send_message(
             "⚠️ No voice channels found.", ephemeral=True)
@@ -2047,7 +2046,7 @@ async def sub(interaction: discord.Interaction, player_out: str, player_in: str)
     teams = team_storage.get(gid, {})
     if not teams:
         await interaction.response.send_message(
-            "⚠️ No active teams. Use `/teams` first.", ephemeral=True)
+            "⚠️ No active teams. Use `/teammanager` first.", ephemeral=True)
         return
     guild = interaction.guild
     member_out = next(
@@ -2473,7 +2472,7 @@ async def export(interaction: discord.Interaction):
 async def view_presets(interaction: discord.Interaction):
     if not presets.get(str(interaction.guild_id)):
         await interaction.response.send_message(
-            "⚠️ No presets saved yet. Use 💾 Save Preset in `/teams`.", ephemeral=True)
+            "⚠️ No presets saved yet. Use Save Current in `/teammanager`.", ephemeral=True)
         return
     gp = presets.get(str(interaction.guild_id), {})
     options = [discord.SelectOption(label=n,
@@ -2635,7 +2634,7 @@ async def _admin_error(interaction: discord.Interaction, error):
     else:
         raise error
 
-for cmd in [recall, teams, sub, import_mmr, export,
+for cmd in [recall, teammanager, sub, import_mmr, export,
             view_presets, view_history, matchmaking, orbital_jump, sync_commands]:
     cmd.error(_admin_error)
 
