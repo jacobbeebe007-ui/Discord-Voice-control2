@@ -166,6 +166,7 @@ def _refresh_interval_minutes() -> float:
 STATS_REFRESH_INTERVAL_MINUTES = _refresh_interval_minutes()
 
 
+DEFAULT_LOBBY_NAME = "Tactical Operations Center (TOC - The Lobby)"
 BASE_MMR = 1000.0
 OLD_MMR_MULTIPLIER = 19.0
 STAT_SCORE_WEIGHT = 0.85
@@ -1200,70 +1201,39 @@ class TeamHistorySelect(discord.ui.Select):
             content="\n".join(lines), view=self.view)
 
 # ─────────────────────────────────────────────
-# RECALL PICKER
+# RECALL HELPERS
 # ─────────────────────────────────────────────
-class RecallPickerView(discord.ui.View):
-    """Shows confirm/change controls when a lobby is saved, otherwise a channel picker."""
-    def __init__(self, guild):
-        super().__init__(timeout=TIMEOUT_MENU)
-        self.guild = guild
-        saved_id = recall_channels.get(str(guild.id))
-        self.saved_lobby = guild.get_channel(saved_id) if saved_id else None
+def get_default_lobby(guild: discord.Guild):
+    return discord.utils.get(guild.voice_channels, name=DEFAULT_LOBBY_NAME)
 
-        if self.saved_lobby:
-            # Add a confirm button — clean single click to recall
-            btn = discord.ui.Button(
-                label=f"✅ Confirm — recall to {self.saved_lobby.name}",
-                style=discord.ButtonStyle.success, row=0)
-            btn.callback = self.on_confirm
-            self.add_item(btn)
-            # Add a change button
-            change_btn = discord.ui.Button(
-                label="🔄 Change lobby", style=discord.ButtonStyle.secondary, row=0)
-            change_btn.callback = self.on_change
-            self.add_item(change_btn)
-        else:
-            options = [discord.SelectOption(label=c.name, value=str(c.id))
-                       for c in guild.voice_channels[:25]]
-            self.select = discord.ui.Select(
-                placeholder="Pick the lobby channel...", options=options, row=0)
-            self.select.callback = self.on_select
-            self.add_item(self.select)
 
-    async def _do_recall(self, interaction: discord.Interaction, lobby: discord.VoiceChannel):
-        recall_channels[str(self.guild.id)] = lobby.id
-        save_json(RECALL_FILE, recall_channels)
-        moved = 0
-        for vc in self.guild.voice_channels:
-            if vc.id == lobby.id:
-                continue
-            for member in list(vc.members):
-                if member.voice:
+async def recall_to_default_lobby(interaction: discord.Interaction, guild: discord.Guild):
+    lobby = get_default_lobby(guild)
+    if not lobby:
+        await interaction.response.send_message(
+            f"⚠️ Default lobby **{DEFAULT_LOBBY_NAME}** was not found.",
+            ephemeral=True,
+        )
+        return
+
+    recall_channels[str(guild.id)] = lobby.id
+    save_json(RECALL_FILE, recall_channels)
+    moved, failed = 0, []
+    await interaction.response.defer(ephemeral=True)
+    for vc in guild.voice_channels:
+        if vc.id == lobby.id:
+            continue
+        for member in list(vc.members):
+            if member.voice:
+                try:
                     await member.move_to(lobby)
                     moved += 1
-        await interaction.response.edit_message(
-            content=f"✅ Recalled **{moved}** member(s) to **{lobby.name}**.", view=None)
-
-    async def on_confirm(self, interaction: discord.Interaction):
-        await self._do_recall(interaction, self.saved_lobby)
-
-    async def on_change(self, interaction: discord.Interaction):
-        options = [discord.SelectOption(label=c.name, value=str(c.id))
-                   for c in self.guild.voice_channels[:25]]
-        self.clear_items()
-        self.select = discord.ui.Select(
-            placeholder="Pick a new lobby channel...", options=options, row=0)
-        self.select.callback = self.on_select
-        self.add_item(self.select)
-        await interaction.response.edit_message(
-            content="🔁 **Recall** — pick a new lobby channel:", view=self)
-
-    async def on_select(self, interaction: discord.Interaction):
-        lobby = self.guild.get_channel(int(self.select.values[0]))
-        if not lobby:
-            await interaction.response.edit_message(content="⚠️ Channel not found.", view=self)
-            return
-        await self._do_recall(interaction, lobby)
+                except Exception:
+                    failed.append(member.display_name)
+    msg = f"✅ Recalled **{moved}** member(s) to **{lobby.name}**."
+    if failed:
+        msg += f"\n⚠️ Could not move: {', '.join(failed)}"
+    await interaction.followup.send(msg, ephemeral=True)
 
 # ─────────────────────────────────────────────
 # TEAM BUILDER
@@ -1482,14 +1452,7 @@ class TeamsDashboardView(discord.ui.View):
 
     @discord.ui.button(label="Recall Lobby", style=discord.ButtonStyle.success, row=1)
     async def recall_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
-        saved_id = recall_channels.get(str(self.guild.id))
-        saved = self.guild.get_channel(saved_id) if saved_id else None
-        msg = (
-            f"## Recall\nLobby is **{saved.name}**."
-            if saved
-            else "## Recall\nPick a lobby channel:"
-        )
-        await interaction.response.send_message(msg, view=RecallPickerView(self.guild), ephemeral=True)
+        await recall_to_default_lobby(interaction, self.guild)
 
     @discord.ui.button(label="Presets", style=discord.ButtonStyle.secondary, row=2)
     async def saved_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1621,9 +1584,8 @@ class TeamBuilderView(discord.ui.View):
         return f"**Staged ({len(names)}):** {preview}"
 
     def _builder_content(self, status: str = "") -> str:
-        saved_id = recall_channels.get(str(self.guild.id))
-        saved = self.guild.get_channel(saved_id) if saved_id else None
-        lobby = f"**{saved.name}**" if saved else "_not set — `/recall`_"
+        default_lobby = get_default_lobby(self.guild)
+        lobby = f"**{default_lobby.name}**" if default_lobby else f"_missing — {DEFAULT_LOBBY_NAME}_"
         ch = self.channel_select.selected_vc_id
         ch_name = "_pick above ↑_"
         if ch:
@@ -1741,14 +1703,7 @@ class TeamBuilderView(discord.ui.View):
 
     @discord.ui.button(label="Recall Lobby", style=discord.ButtonStyle.success, row=4)
     async def recall_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
-        saved_id = recall_channels.get(str(self.guild.id))
-        saved = self.guild.get_channel(saved_id) if saved_id else None
-        msg = (
-            f"## Recall\nLobby is **{saved.name}**."
-            if saved
-            else "## Recall\nPick a lobby channel:"
-        )
-        await interaction.response.send_message(msg, view=RecallPickerView(self.guild), ephemeral=True)
+        await recall_to_default_lobby(interaction, self.guild)
 
 # ─────────────────────────────────────────────
 # HALO 3 MATCHMAKING
