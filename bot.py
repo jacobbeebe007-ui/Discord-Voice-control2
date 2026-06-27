@@ -114,13 +114,6 @@ class HaloBot(commands.Bot):
             "matchmaking",
             "orbital_jump",
             "sync",
-            "leaderboard",
-            "mmr",
-            "compare",
-            "rivals",
-            "stats",
-            "session",
-            "podium",
         )
         for name in admin_cmd_names:
             cmd = self.tree.get_command(name)
@@ -172,7 +165,7 @@ OLD_MMR_MULTIPLIER = 19.0
 STAT_SCORE_WEIGHT = 0.85
 PLACEMENT_SCORE_WEIGHT = 0.15
 MMR_DELTA_MULTIPLIER = 0.6
-MMR_DELTA_CAP = 40.0
+MMR_DELTA_CAP = 500.0
 
 HALO_RANKS = [
     (2910.0, "Inheritor", "021_Inheritor"),
@@ -2241,9 +2234,6 @@ async def import_mmr(interaction: discord.Interaction,
         await interaction.followup.send(f"❌ Error: {e}{upload_hint}", ephemeral=True)
 
 
-@bot.tree.command(name="leaderboard",
-    description="[Admin] Show the Halo Reach MMR leaderboard.")
-@is_admin()
 async def leaderboard(interaction: discord.Interaction):
     gmmr = get_guild_mmr(interaction.guild_id)
     if not gmmr:
@@ -2278,9 +2268,6 @@ async def leaderboard(interaction: discord.Interaction):
     await send_single_or_chunked(interaction, lines, header=header, ephemeral=False)
 
 
-@bot.tree.command(name="mmr",
-    description="[Admin] Look up a player's MMR, rank, and session history.")
-@is_admin()
 async def mmr_lookup(interaction: discord.Interaction, player: str):
     gmmr  = get_guild_mmr(interaction.guild_id)
     match = next((v for k, v in gmmr.items() if k.lower() == player.lower()), None)
@@ -2385,7 +2372,7 @@ async def explain_mmr(interaction: discord.Interaction):
         "`85% stat score + 15% placement score`",
         "",
         "Each new session compares your performance to what is expected from your MMR versus the lobby average.",
-        "The session change is capped between **-40** and **+40** MMR so ratings move steadily.",
+        "The session change is capped between **-500** and **+500** MMR because Halo Nights include multiple games.",
         "",
         "Ranks use the new 1000+ scale. **Inheritor starts at 2910**, but you can keep climbing above it.",
         f"Ranks are provisional until **{PROVISIONAL_SESSIONS}** sessions are recorded.",
@@ -2393,8 +2380,6 @@ async def explain_mmr(interaction: discord.Interaction):
     await send_minimal(interaction, "\n".join(lines), ephemeral=True, timeout=TIMEOUT_STAT)
 
 
-@bot.tree.command(name="compare", description="[Admin] Compare 2 to 4 players side by side.")
-@is_admin()
 async def compare(interaction: discord.Interaction,
                   player1: str, player2: str,
                   player3: str = None, player4: str = None):
@@ -2468,9 +2453,6 @@ async def compare(interaction: discord.Interaction,
     await send_single_or_chunked(interaction, lines, ephemeral=False, timeout=TIMEOUT_STAT)
 
 
-@bot.tree.command(name="rivals",
-    description="[Admin] Head-to-head session history between two players.")
-@is_admin()
 async def rivals(interaction: discord.Interaction, player1: str, player2: str):
     gmmr = get_guild_mmr(interaction.guild_id)
     d1   = next((v for k, v in gmmr.items() if k.lower() == player1.lower()), None)
@@ -2518,8 +2500,6 @@ async def rivals(interaction: discord.Interaction, player1: str, player2: str):
     await send_single_or_chunked(interaction, lines, ephemeral=False, timeout=TIMEOUT_STAT)
 
 
-@bot.tree.command(name="stats", description="[Admin] Show top performers by stat category.")
-@is_admin()
 async def stats(interaction: discord.Interaction):
     gmmr = get_guild_mmr(interaction.guild_id)
     if not gmmr:
@@ -2550,9 +2530,6 @@ async def stats(interaction: discord.Interaction):
     await send_single_or_chunked(interaction, lines, ephemeral=False, timeout=TIMEOUT_STAT)
 
 
-@bot.tree.command(name="session",
-    description="[Admin] Look up a player's stats from a specific session number.")
-@is_admin()
 async def session_lookup(interaction: discord.Interaction, number: int, player: str):
     gmmr  = get_guild_mmr(interaction.guild_id)
     match = next((v for k, v in gmmr.items() if k.lower() == player.lower()), None)
@@ -2655,8 +2632,6 @@ async def view_history(interaction: discord.Interaction):
         view=TeamHistoryView(interaction.guild), ephemeral=True)
 
 
-@bot.tree.command(name="podium", description="[Admin] Show 🥇🥈🥉 top 3 in every stat category.")
-@is_admin()
 async def podium(interaction: discord.Interaction):
     gmmr = get_guild_mmr(interaction.guild_id)
     if not gmmr:
@@ -2702,19 +2677,19 @@ async def podium(interaction: discord.Interaction):
     description="Open a one-command MMR/stats interface with buttons.")
 async def mmr_hub(interaction: discord.Interaction):
     handlers = {
-        "leaderboard": lambda inter: leaderboard.callback(inter),
-        "mmr": lambda inter, player: mmr_lookup.callback(inter, player),
-        "compare": lambda inter, players: compare.callback(
+        "leaderboard": leaderboard,
+        "mmr": mmr_lookup,
+        "compare": lambda inter, players: compare(
             inter,
             players[0],
             players[1],
             players[2] if len(players) > 2 else None,
             players[3] if len(players) > 3 else None,
         ),
-        "rivals": lambda inter, p1, p2: rivals.callback(inter, p1, p2),
-        "session": lambda inter, number, player: session_lookup.callback(inter, number, player),
-        "podium": lambda inter: podium.callback(inter),
-        "stats": lambda inter: stats.callback(inter),
+        "rivals": rivals,
+        "session": session_lookup,
+        "podium": podium,
+        "stats": stats,
     }
     await interaction.response.send_message(
         "📘 **MMR & Stats Interface** — use the buttons below:",

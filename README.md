@@ -113,12 +113,7 @@ The bot uses custom server emojis for the 22 Halo Reach ranks. Upload the follow
 | Command | Description |
 |---|---|
 | `/rank` | Check your own current rank, MMR and stats |
-| `/mmr [player]` | Full stats, rank history and session breakdown for a player |
-| `/leaderboard` | Full MMR leaderboard grouped by Halo Reach rank |
-| `/compare [p1] [p2]` | Side by side stat comparison with winners highlighted |
-| `/rivals [p1] [p2]` | Head-to-head session history and overall win tally |
-| `/stats` | Top performer in every stat category |
-| `/session [session] [player]` | A player's stats from a specific session e.g. `Session 1` |
+| `/mmr_hub` | Button hub for leaderboard, player MMR lookup, compare, rivals, sessions, stats and podium |
 | `/matchmaking` | Roll Halo 3 maps, game types and teams — single or two match with veto |
 | `/explainmmr` | Explain how MMR, placements, session deltas and ranks work |
 | `/help` | List all commands available to you |
@@ -175,7 +170,7 @@ Each stat is normalised 0–100 relative to players in that session. If session 
 performance_score = 85% stat_score + 15% placement_score
 ```
 
-The bot compares the player's performance score to the expected score for their current MMR versus the lobby average. Each session can change MMR by up to **+40** or **-40**.
+The bot compares the player's performance score to the expected score for their current MMR versus the lobby average. Each session can change MMR by up to **+500** or **-500**.
 
 Players with fewer than 3 sessions are marked as **provisional** with an asterisk `*` and their rank is not yet confirmed.
 
