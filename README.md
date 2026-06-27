@@ -39,6 +39,8 @@ pip install -r requirements.txt
 Create a `.env` file in the project root:
 ```
 DISCORD_BOT_TOKEN=your_token_here
+GOOGLE_SHEET_XLSX_URL=https://docs.google.com/spreadsheets/d/1O4Ez5uVnxbFDLooKfwPPxQHyFKq-SnX_s1CklwRP-Ik/export?format=xlsx
+STATS_REFRESH_INTERVAL_MINUTES=10
 ```
 
 ### Running locally
@@ -52,7 +54,8 @@ python bot.py
 1. Push to a GitHub repo
 2. Connect the repo to [Railway](https://railway.app)
 3. Add `DISCORD_BOT_TOKEN` as an environment variable in Railway
-4. Railway will auto-deploy on every push to `main`
+4. Optionally add `GOOGLE_SHEET_XLSX_URL` and `STATS_REFRESH_INTERVAL_MINUTES` to override the default stats source and refresh interval
+5. Railway will auto-deploy on every push to `main`
 
 ---
 
@@ -127,7 +130,7 @@ The bot uses custom server emojis for the 22 Halo Reach ranks. Upload the follow
 | `/sub [player_out] [player_in]` | Swap two players between active teams |
 | `/recall` | Move all voice members back to their mapped lobby channels |
 | `/set_lobby` | Map voice channels to lobby destinations for `/recall` |
-| `/import_mmr` | Upload a session Excel file to update all player MMR and history |
+| `/import_mmr` | Manually refresh MMR from Google Sheets, the repo workbook, or an uploaded backup |
 | `/export` | Download the current MMR data as a timestamped JSON backup |
 | `/presets` | View and load saved team lineup presets |
 | `/history` | Browse the last 10 team configurations |
@@ -151,9 +154,13 @@ Each stat is normalised 0–100 relative to all players in that import, then wei
 
 Players with fewer than 3 sessions are marked as **provisional** with an asterisk `*` and their rank is not yet confirmed.
 
-### Excel File
+### Stats Source
 
-Commit `Collection_of_Stats_across_Halo_Nights.xlsx` to the root of your GitHub repo alongside `bot.py`. Railway will include it in the deployment and the bot reads it from disk.
+The bot refreshes stats automatically every 10 minutes by default. It tries sources in this order:
+
+1. Google Sheet XLSX export from `GOOGLE_SHEET_XLSX_URL`
+2. `Collection_of_Stats_across_Halo_Nights.xlsx` committed to the GitHub repo root alongside `bot.py`
+3. A Discord `.xlsx` upload when an admin runs `/import_mmr file:<attachment>`
 
 The bot expects the following sheets:
 - **`Leaderboard`** — cumulative stats across all sessions (used for overall MMR)
@@ -161,9 +168,9 @@ The bot expects the following sheets:
 
 Sheets named `Collective` or `Summary` are ignored.
 
-**Updating stats:** Edit your Excel file locally, commit and push to GitHub. Railway redeploys automatically and `/import_mmr` will read the updated file.
+**Updating stats:** Update the Google Sheet first. If the Sheet cannot be fetched, the bot falls back to the committed workbook from GitHub on the next scheduled refresh or `/import_mmr`.
 
-**Override with upload:** You can also run `/import_mmr` with a file attached to import from that file directly, bypassing the repo file. Useful for testing before committing.
+**Manual backup:** Run `/import_mmr` with a `.xlsx` file attached only when both the Google Sheet and repo workbook are unavailable.
 
 ---
 

@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 from collections import OrderedDict
 import json, os, random, io, datetime
@@ -142,24 +142,40 @@ class HaloBot(commands.Bot):
 # Message timeout constants (seconds)
 TIMEOUT_STAT = 180   # stat lookups — 3 minutes
 TIMEOUT_MENU = 60    # pickers, menus — 1 minute
-# None = never auto-delete (team lists, leaderboard)
-GOOGLE_SHEET_XLSX_URL = (
-    "https://docs.google.com/spreadsheets/d/"
-    "1O4Ez5uVnxbFDLooKfwPPxQHyFKq-SnX_s1CklwRP-Ik/export?format=xlsx"
-)
-
 def load_json(path):
     if os.path.exists(path):
         with open(path) as f:
             return json.load(f)
     return {}
 
-# None = never auto-delete (team lists, leaderboard)
-GOOGLE_SHEET_XLSX_URL = (
+DEFAULT_GOOGLE_SHEET_XLSX_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1O4Ez5uVnxbFDLooKfwPPxQHyFKq-SnX_s1CklwRP-Ik/export?format=xlsx"
 )
 LOCAL_STATS_FILE = "Collection_of_Stats_across_Halo_Nights.xlsx"
+
+
+def _google_sheet_export_url(url: str) -> str:
+    match = re.search(r"/spreadsheets/d/([^/]+)", url or "")
+    if match:
+        return f"https://docs.google.com/spreadsheets/d/{match.group(1)}/export?format=xlsx"
+    return url
+
+
+GOOGLE_SHEET_XLSX_URL = _google_sheet_export_url(
+    os.getenv("GOOGLE_SHEET_XLSX_URL", DEFAULT_GOOGLE_SHEET_XLSX_URL)
+)
+
+
+def _refresh_interval_minutes() -> float:
+    try:
+        minutes = float(os.getenv("STATS_REFRESH_INTERVAL_MINUTES", "10"))
+        return minutes if minutes > 0 else 10.0
+    except ValueError:
+        return 10.0
+
+
+STATS_REFRESH_INTERVAL_MINUTES = _refresh_interval_minutes()
 
 
 class _LegacyCommandShim:
@@ -275,6 +291,142 @@ def parse_leaderboard_sheet(ws) -> list:
         except:
             continue
     return players
+
+
+def load_workbook_from_google():
+    import openpyxl
+
+    with urlopen(GOOGLE_SHEET_XLSX_URL, timeout=20) as resp:
+        wb = openpyxl.load_workbook(io.BytesIO(resp.read()))
+    return wb, "Google Sheet"
+
+
+def load_workbook_from_repo():
+    import openpyxl
+
+    if not os.path.exists(LOCAL_STATS_FILE):
+        raise FileNotFoundError(f"{LOCAL_STATS_FILE} was not found")
+    return openpyxl.load_workbook(LOCAL_STATS_FILE), f"`{LOCAL_STATS_FILE}` from repo"
+
+
+async def load_workbook_from_upload(file: discord.Attachment):
+    import openpyxl
+
+    if not file.filename.lower().endswith(".xlsx"):
+        raise ValueError("Please upload a `.xlsx` file.")
+    return openpyxl.load_workbook(io.BytesIO(await file.read())), f"uploaded file `{file.filename}`"
+
+
+async def load_stats_workbook(file: discord.Attachment = None, allow_upload: bool = False):
+    errors = []
+    for loader in (load_workbook_from_google, load_workbook_from_repo):
+        try:
+            return loader()
+        except Exception as exc:
+            errors.append(str(exc))
+
+    if allow_upload and file is not None:
+        try:
+            return await load_workbook_from_upload(file)
+        except Exception as exc:
+            errors.append(str(exc))
+
+    sources = "Google Sheet and repo workbook"
+    if allow_upload and file is not None:
+        sources += " and Discord upload"
+    raise RuntimeError(f"Could not load stats from {sources}. Last error: {errors[-1] if errors else 'unknown'}")
+
+
+def import_workbook_stats(guild_id: int, wb) -> list:
+    gid = str(guild_id)
+    if gid not in mmr_data:
+        mmr_data[gid] = {}
+
+    skip = ("collective", "summary")
+    session_sheets = [s for s in wb.sheetnames
+                      if not any(k in s.lower() for k in skip)
+                      and s.lower() != "leaderboard"]
+
+    per_player: dict = {}
+    for sheet_name in session_sheets:
+        players = parse_session_sheet(wb[sheet_name])
+        if not players:
+            continue
+        players = calculate_mmr(players)
+        players_sorted = sorted(players, key=lambda x: x["mmr"], reverse=True)
+        session_ranks  = {p["name"]: i+1 for i, p in enumerate(players_sorted)}
+        session_size   = len(players)
+        for p in players:
+            cname = p["name"]
+            if cname not in per_player:
+                per_player[cname] = []
+            per_player[cname].append({
+                "session":      sheet_name,
+                "mmr":          p["mmr"],
+                "kills":        p.get("kills", 0),
+                "assists":      p.get("assists", 0),
+                "deaths":       p.get("deaths", 0),
+                "kd":           p["kd"],
+                "captures":     p.get("captures", 0),
+                "obj_time":     p.get("obj_time", 0),
+                "points":       p["points"],
+                "session_rank": session_ranks.get(p["name"], "?"),
+                "session_size": session_size,
+            })
+
+    overall_mmr: dict = {}
+    if "Leaderboard" in wb.sheetnames:
+        lb_players = parse_leaderboard_sheet(wb["Leaderboard"])
+        if lb_players:
+            lb_players = calculate_mmr(lb_players)
+            for p in lb_players:
+                overall_mmr[p["name"]] = p
+
+    if not per_player and not overall_mmr:
+        return []
+
+    all_names = set(per_player.keys()) | set(overall_mmr.keys())
+    imported  = []
+    for cname in all_names:
+        existing      = mmr_data[gid].get(cname, {})
+        sessions_list = per_player.get(cname, [])
+        lb = overall_mmr.get(cname) or next(
+            (v for k, v in overall_mmr.items() if k.lower() == cname.lower()), None)
+        existing_sessions = [h["session"] for h in existing.get("history", [])]
+        new_history = existing.get("history", [])
+        for s in sessions_list:
+            if s["session"] not in existing_sessions:
+                new_history.append(s)
+        merged_history = sorted(new_history, key=lambda x: session_sort_key(x.get("session", "")))
+        if lb:
+            overall = lb["mmr"]
+            kd, kills, deaths = lb["kd"], lb.get("kills", 0), lb.get("deaths", 0)
+            points, obj_time  = lb["points"], lb["obj_time"]
+            assists, captures = lb["assists"], lb["captures"]
+            session_count     = lb["sessions"]
+        elif merged_history:
+            overall = round(sum(s["mmr"] for s in merged_history) / len(merged_history), 1)
+            last    = merged_history[-1]
+            kd, kills = last["kd"], last.get("kills", 0)
+            deaths    = last.get("deaths", 0)
+            points, obj_time = last["points"], last.get("obj_time", 0)
+            assists, captures = last.get("assists", 0), last.get("captures", 0)
+            session_count = len(merged_history)
+        else:
+            continue
+        gamertag = lb.get("gamertag", "") if lb else ""
+        mmr_data[gid][cname] = {
+            "mmr": overall, "kd": kd, "kills": kills, "deaths": deaths,
+            "points": points, "obj_time": obj_time, "assists": assists,
+            "captures": captures, "sessions": session_count,
+            "gamertag": gamertag, "history": merged_history,
+        }
+        imported.append((cname, overall, session_count))
+
+    save_json(MMR_FILE, mmr_data)
+    imported.sort(key=lambda x: x[1], reverse=True)
+    return imported
+
 
 def get_guild_mmr(guild_id: int) -> dict:
     return mmr_data.get(str(guild_id), {})
@@ -1717,125 +1869,17 @@ async def sub(interaction: discord.Interaction, player_out: str, player_in: str)
 
 
 @bot.tree.command(name="import_mmr",
-    description="[Admin] Import stats from Google Sheets, or upload a new file.")
+    description="[Admin] Refresh stats from Google Sheets, repo file, or upload backup.")
 @is_admin()
 async def import_mmr(interaction: discord.Interaction,
                      file: discord.Attachment = None):
     await interaction.response.defer(ephemeral=True)
     try:
-        import openpyxl
-        if file is not None:
-            if not file.filename.endswith((".xlsx", ".csv")):
-                await interaction.followup.send(
-                    "⚠️ Please upload a `.xlsx` file.", ephemeral=True)
-                return
-            wb = openpyxl.load_workbook(io.BytesIO(await file.read()))
-            source_label = f"uploaded file `{file.filename}`"
-        else:
-            try:
-                with urlopen(GOOGLE_SHEET_XLSX_URL, timeout=20) as resp:
-                    wb = openpyxl.load_workbook(io.BytesIO(resp.read()))
-                source_label = "Google Sheet"
-            except Exception:
-                if os.path.exists(LOCAL_STATS_FILE):
-                    wb = openpyxl.load_workbook(LOCAL_STATS_FILE)
-                    source_label = f"`{LOCAL_STATS_FILE}` from repo"
-                else:
-                    await interaction.followup.send(
-                        "⚠️ Could not fetch the Google Sheet and no local stats file was found.\n"
-                        "Please upload a `.xlsx` file to `/import_mmr file:` instead.",
-                        ephemeral=True,
-                    )
-                    return
-
-        gid = str(interaction.guild_id)
-        if gid not in mmr_data:
-            mmr_data[gid] = {}
-
-        skip = ("collective", "summary")
-        session_sheets = [s for s in wb.sheetnames
-                          if not any(k in s.lower() for k in skip)
-                          and s.lower() != "leaderboard"]
-
-        per_player: dict = {}
-        for sheet_name in session_sheets:
-            players = parse_session_sheet(wb[sheet_name])
-            if not players:
-                continue
-            players = calculate_mmr(players)
-            players_sorted = sorted(players, key=lambda x: x["mmr"], reverse=True)
-            session_ranks  = {p["name"]: i+1 for i, p in enumerate(players_sorted)}
-            session_size   = len(players)
-            for p in players:
-                cname = p["name"]
-                if cname not in per_player:
-                    per_player[cname] = []
-                per_player[cname].append({
-                    "session":      sheet_name,
-                    "mmr":          p["mmr"],
-                    "kills":        p.get("kills", 0),
-                    "assists":      p.get("assists", 0),
-                    "deaths":       p.get("deaths", 0),
-                    "kd":           p["kd"],
-                    "captures":     p.get("captures", 0),
-                    "obj_time":     p.get("obj_time", 0),
-                    "points":       p["points"],
-                    "session_rank": session_ranks.get(p["name"], "?"),
-                    "session_size": session_size,
-                })
-
-        overall_mmr: dict = {}
-        if "Leaderboard" in wb.sheetnames:
-            lb_players = parse_leaderboard_sheet(wb["Leaderboard"])
-            if lb_players:
-                lb_players = calculate_mmr(lb_players)
-                for p in lb_players:
-                    overall_mmr[p["name"]] = p
-
-        if not per_player and not overall_mmr:
+        wb, source_label = await load_stats_workbook(file=file, allow_upload=file is not None)
+        imported = import_workbook_stats(interaction.guild_id, wb)
+        if not imported:
             await interaction.followup.send("⚠️ No valid data found.", ephemeral=True)
             return
-
-        all_names = set(per_player.keys()) | set(overall_mmr.keys())
-        imported  = []
-        for cname in all_names:
-            existing      = mmr_data[gid].get(cname, {})
-            sessions_list = per_player.get(cname, [])
-            lb = overall_mmr.get(cname) or next(
-                (v for k, v in overall_mmr.items() if k.lower() == cname.lower()), None)
-            existing_sessions = [h["session"] for h in existing.get("history", [])]
-            new_history = existing.get("history", [])
-            for s in sessions_list:
-                if s["session"] not in existing_sessions:
-                    new_history.append(s)
-            merged_history = sorted(new_history, key=lambda x: session_sort_key(x.get("session", "")))
-            if lb:
-                overall = lb["mmr"]
-                kd, kills, deaths = lb["kd"], lb.get("kills", 0), lb.get("deaths", 0)
-                points, obj_time  = lb["points"], lb["obj_time"]
-                assists, captures = lb["assists"], lb["captures"]
-                session_count     = lb["sessions"]
-            elif merged_history:
-                overall = round(sum(s["mmr"] for s in merged_history) / len(merged_history), 1)
-                last    = merged_history[-1]
-                kd, kills = last["kd"], last.get("kills", 0)
-                deaths    = last.get("deaths", 0)
-                points, obj_time = last["points"], last.get("obj_time", 0)
-                assists, captures = last.get("assists", 0), last.get("captures", 0)
-                session_count = len(merged_history)
-            else:
-                continue
-            gamertag = lb.get("gamertag", "") if lb else ""
-            mmr_data[gid][cname] = {
-                "mmr": overall, "kd": kd, "kills": kills, "deaths": deaths,
-                "points": points, "obj_time": obj_time, "assists": assists,
-                "captures": captures, "sessions": session_count,
-                "gamertag": gamertag, "history": merged_history,
-            }
-            imported.append((cname, overall, session_count))
-
-        save_json(MMR_FILE, mmr_data)
-        imported.sort(key=lambda x: x[1], reverse=True)
 
         lines = []
         for cname, mmr, sessions in imported:
@@ -1851,7 +1895,8 @@ async def import_mmr(interaction: discord.Interaction,
         await send_single_or_chunked(interaction, lines, header=header, ephemeral=True)
 
     except Exception as e:
-        await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+        upload_hint = "\nAttach a `.xlsx` file to `/import_mmr file:` as the final backup." if file is None else ""
+        await interaction.followup.send(f"❌ Error: {e}{upload_hint}", ephemeral=True)
 
 
 @bot.tree.command(name="leaderboard",
@@ -2374,6 +2419,35 @@ for cmd in [recall, teams, sub, import_mmr, export,
             view_presets, view_history, matchmaking, orbital_jump, sync_commands]:
     cmd.error(_admin_error)
 
+
+@tasks.loop(minutes=STATS_REFRESH_INTERVAL_MINUTES)
+async def scheduled_stats_refresh():
+    try:
+        wb, source_label = await load_stats_workbook()
+    except Exception as exc:
+        print(f"⚠️ Scheduled stats refresh failed before import: {exc}")
+        return
+
+    refreshed_guilds = 0
+    imported_players = 0
+    for guild in bot.guilds:
+        try:
+            imported = import_workbook_stats(guild.id, wb)
+        except Exception as exc:
+            print(f"⚠️ Scheduled stats refresh failed for {guild.name}: {exc}")
+            continue
+        if imported:
+            refreshed_guilds += 1
+            imported_players = max(imported_players, len(imported))
+
+    if refreshed_guilds:
+        print(
+            f"✅ Scheduled stats refresh imported {imported_players} players "
+            f"from {source_label} for {refreshed_guilds} guild(s)."
+        )
+    else:
+        print(f"⚠️ Scheduled stats refresh found no valid player data in {source_label}.")
+
 # ─────────────────────────────────────────────
 # STARTUP
 # ─────────────────────────────────────────────
@@ -2387,6 +2461,9 @@ async def on_ready():
             pass
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
     print(f"   Slash commands synced to {len(bot.guilds)} guild(s).")
+    if not scheduled_stats_refresh.is_running():
+        scheduled_stats_refresh.start()
+        print(f"   Scheduled stats refresh every {STATS_REFRESH_INTERVAL_MINUTES:g} minute(s).")
 
 if __name__ == "__main__":
     bot.run(TOKEN)
