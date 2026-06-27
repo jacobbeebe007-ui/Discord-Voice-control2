@@ -37,19 +37,7 @@ except ModuleNotFoundError:
     TEAM_HISTORY_FILE = "team_history.json"
     RECALL_FILE = "recall_channels.json"
 
-    HALO_RANKS = [
-        (95.5, "Inheritor", "021_Inheritor"), (91.0, "Reclaimer", "020_Reclaimer"),
-        (86.5, "Forerunner", "019_Forerunner"), (82.0, "Nova", "018_Nova"),
-        (77.5, "Eclipse", "017_Eclipse"), (73.0, "Noble", "016_Noble"),
-        (68.5, "Mythic", "015_Mythic"), (64.0, "Legend", "014_Legend"),
-        (59.5, "Hero", "013_Hero"), (55.0, "Field_Marshall", "012_Field_Marshall"),
-        (50.5, "General", "011_General"), (46.0, "Brigadier", "010_Brigadier"),
-        (41.5, "Colonel", "009_Colonel"), (37.0, "Commander", "008_Commander"),
-        (32.5, "Lt_Colonel", "007_Lt_Colonel"), (28.0, "Major", "006_Major"),
-        (23.5, "Captain", "005_Captain"), (19.0, "Warrant_Officer", "004_Warrant_Officer"),
-        (14.5, "Sergeant", "003_Sergeant"), (10.0, "Corporal", "002_Corporal"),
-        (5.0, "Private", "001_Private"), (0.0, "Recruit", "000_Recruit"),
-    ]
+    HALO_RANKS = []
 
     def halo_rank(mmr: float) -> tuple:
         for threshold, name, ename in HALO_RANKS:
@@ -178,6 +166,40 @@ def _refresh_interval_minutes() -> float:
 STATS_REFRESH_INTERVAL_MINUTES = _refresh_interval_minutes()
 
 
+BASE_MMR = 1000.0
+OLD_MMR_MULTIPLIER = 19.0
+STAT_SCORE_WEIGHT = 0.85
+PLACEMENT_SCORE_WEIGHT = 0.15
+MMR_DELTA_MULTIPLIER = 0.6
+MMR_DELTA_CAP = 40.0
+
+HALO_RANKS = [
+    (2910.0, "Inheritor", "021_Inheritor"),
+    (2820.0, "Reclaimer", "020_Reclaimer"),
+    (2730.0, "Forerunner", "019_Forerunner"),
+    (2640.0, "Nova", "018_Nova"),
+    (2550.0, "Eclipse", "017_Eclipse"),
+    (2460.0, "Noble", "016_Noble"),
+    (2370.0, "Mythic", "015_Mythic"),
+    (2280.0, "Legend", "014_Legend"),
+    (2190.0, "Hero", "013_Hero"),
+    (2100.0, "Field_Marshall", "012_Field_Marshall"),
+    (2010.0, "General", "011_General"),
+    (1920.0, "Brigadier", "010_Brigadier"),
+    (1830.0, "Colonel", "009_Colonel"),
+    (1740.0, "Commander", "008_Commander"),
+    (1650.0, "Lt_Colonel", "007_Lt_Colonel"),
+    (1560.0, "Major", "006_Major"),
+    (1470.0, "Captain", "005_Captain"),
+    (1380.0, "Warrant_Officer", "004_Warrant_Officer"),
+    (1290.0, "Sergeant", "003_Sergeant"),
+    (1200.0, "Corporal", "002_Corporal"),
+    (1100.0, "Private", "001_Private"),
+    (1000.0, "Recruit", "000_Recruit"),
+    (0.0, "Recruit", "000_Recruit"),
+]
+
+
 class _LegacyCommandShim:
     """Compatibility shim for older command-binding loops in stale deployments."""
     def error(self, *_args, **_kwargs):
@@ -224,6 +246,88 @@ def session_sort_key(label: str) -> tuple:
 # ─────────────────────────────────────────────
 WEIGHTS = {"kd": 0.30, "points": 0.25, "obj_time": 0.25, "assists": 0.15, "captures": 0.05}
 
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def migrate_mmr_value(value) -> float:
+    try:
+        mmr = float(value)
+    except (TypeError, ValueError):
+        return BASE_MMR
+    if 0 <= mmr <= 100:
+        return round(BASE_MMR + mmr * OLD_MMR_MULTIPLIER, 1)
+    return round(mmr, 1)
+
+
+def migrate_player_data(data: dict) -> dict:
+    if not data:
+        return {}
+    migrated = dict(data)
+    migrated["mmr"] = migrate_mmr_value(migrated.get("mmr", BASE_MMR))
+    history = []
+    for entry in migrated.get("history", []):
+        h = dict(entry)
+        h["mmr"] = migrate_mmr_value(h.get("mmr", migrated["mmr"]))
+        h.setdefault("performance_score", h.get("stat_score", h.get("mmr", 0)))
+        h.setdefault("placement_score", None)
+        h.setdefault("mmr_delta", 0.0)
+        history.append(h)
+    migrated["history"] = history
+    return migrated
+
+
+def header_key(value) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def find_placement_columns(headers: list) -> dict:
+    aliases = {
+        1: {"1st", "first", "firstplace", "place1", "rank1", "gold"},
+        2: {"2nd", "second", "secondplace", "place2", "rank2", "silver"},
+        3: {"3rd", "third", "thirdplace", "place3", "rank3", "bronze"},
+        4: {"4th", "fourth", "fourthplace", "place4", "rank4"},
+        5: {"5th", "fifth", "fifthplace", "place5", "rank5"},
+        6: {"6th", "sixth", "sixthplace", "place6", "rank6"},
+        7: {"7th", "seventh", "seventhplace", "place7", "rank7"},
+        8: {"8th", "eighth", "eighthplace", "place8", "rank8"},
+    }
+    found = {}
+    for idx, header in enumerate(headers):
+        key = header_key(header)
+        for place, names in aliases.items():
+            if key in names:
+                found[place] = idx
+    return found
+
+
+PLACEMENT_POINTS = {1: 9, 2: 7, 3: 5, 4: 3, 5: 1, 6: 1, 7: 1, 8: 1}
+
+
+def placement_score_from_counts(placements: dict):
+    total = sum(placements.values())
+    if total <= 0:
+        return None
+    earned = sum(count * PLACEMENT_POINTS.get(place, 0) for place, count in placements.items())
+    max_possible = total * PLACEMENT_POINTS[1]
+    return round((earned / max_possible) * 100, 1)
+
+
+def blended_performance_score(stat_score: float, placement_score) -> float:
+    if placement_score is None:
+        return round(stat_score, 1)
+    return round((stat_score * STAT_SCORE_WEIGHT) + (placement_score * PLACEMENT_SCORE_WEIGHT), 1)
+
+
+def expected_session_score(current_mmr: float, lobby_avg_mmr: float) -> float:
+    return clamp(50 + ((current_mmr - lobby_avg_mmr) / 20), 20, 80)
+
+
+def calculate_mmr_delta(actual_score: float, expected_score: float) -> float:
+    raw_delta = (actual_score - expected_score) * MMR_DELTA_MULTIPLIER
+    return round(clamp(raw_delta, -MMR_DELTA_CAP, MMR_DELTA_CAP), 1)
+
 def normalise(values: list) -> list:
     mn, mx = min(values), max(values)
     if mx == mn:
@@ -241,6 +345,8 @@ def parse_session_sheet(ws) -> list:
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
         return []
+    headers = list(rows[0])
+    placement_cols = find_placement_columns(headers)
     players = []
     for row in rows[1:]:
         try:
@@ -250,6 +356,11 @@ def parse_session_sheet(ws) -> list:
             def safe(val):
                 try: return float(val or 0)
                 except: return 0.0
+            placements = {
+                place: safe(row[idx])
+                for place, idx in placement_cols.items()
+                if idx < len(row)
+            }
             players.append({
                 "raw_name": raw,
                 "name":     canonical_name(raw),
@@ -260,6 +371,8 @@ def parse_session_sheet(ws) -> list:
                 "captures": safe(row[6]),
                 "obj_time": safe(row[7]),
                 "points":   safe(row[9]),
+                "placements": placements,
+                "placement_score": placement_score_from_counts(placements),
             })
         except:
             continue
@@ -341,28 +454,45 @@ def import_workbook_stats(guild_id: int, wb) -> list:
     gid = str(guild_id)
     if gid not in mmr_data:
         mmr_data[gid] = {}
+    for name, data in list(mmr_data[gid].items()):
+        mmr_data[gid][name] = migrate_player_data(data)
 
     skip = ("collective", "summary")
-    session_sheets = [s for s in wb.sheetnames
-                      if not any(k in s.lower() for k in skip)
-                      and s.lower() != "leaderboard"]
+    session_sheets = sorted(
+        [s for s in wb.sheetnames
+         if not any(k in s.lower() for k in skip)
+         and s.lower() != "leaderboard"],
+        key=session_sort_key,
+    )
 
     per_player: dict = {}
+    session_participants: dict = {}
     for sheet_name in session_sheets:
         players = parse_session_sheet(wb[sheet_name])
         if not players:
             continue
         players = calculate_mmr(players)
-        players_sorted = sorted(players, key=lambda x: x["mmr"], reverse=True)
+        for p in players:
+            p["stat_score"] = p["mmr"]
+            p["performance_score"] = blended_performance_score(
+                p["stat_score"],
+                p.get("placement_score"),
+            )
+        players_sorted = sorted(players, key=lambda x: x["performance_score"], reverse=True)
         session_ranks  = {p["name"]: i+1 for i, p in enumerate(players_sorted)}
         session_size   = len(players)
+        session_participants[sheet_name] = [p["name"] for p in players]
         for p in players:
             cname = p["name"]
             if cname not in per_player:
                 per_player[cname] = []
             per_player[cname].append({
                 "session":      sheet_name,
-                "mmr":          p["mmr"],
+                "mmr":          None,
+                "stat_score":   p["stat_score"],
+                "placement_score": p.get("placement_score"),
+                "performance_score": p["performance_score"],
+                "mmr_delta":    0.0,
                 "kills":        p.get("kills", 0),
                 "assists":      p.get("assists", 0),
                 "deaths":       p.get("deaths", 0),
@@ -370,6 +500,7 @@ def import_workbook_stats(guild_id: int, wb) -> list:
                 "captures":     p.get("captures", 0),
                 "obj_time":     p.get("obj_time", 0),
                 "points":       p["points"],
+                "placements":   p.get("placements", {}),
                 "session_rank": session_ranks.get(p["name"], "?"),
                 "session_size": session_size,
             })
@@ -386,26 +517,57 @@ def import_workbook_stats(guild_id: int, wb) -> list:
         return []
 
     all_names = set(per_player.keys()) | set(overall_mmr.keys())
+    migrated_existing = {
+        name: migrate_player_data(mmr_data[gid].get(name, {}))
+        for name in all_names
+    }
+    base_mmr_by_name = {}
+    for cname in all_names:
+        existing = migrated_existing.get(cname, {})
+        lb = overall_mmr.get(cname) or next(
+            (v for k, v in overall_mmr.items() if k.lower() == cname.lower()), None)
+        if existing.get("mmr") is not None:
+            base_mmr_by_name[cname] = migrate_mmr_value(existing.get("mmr"))
+        elif lb:
+            base_mmr_by_name[cname] = migrate_mmr_value(lb.get("mmr"))
+        else:
+            base_mmr_by_name[cname] = BASE_MMR
+
     imported  = []
     for cname in all_names:
-        existing      = mmr_data[gid].get(cname, {})
+        existing      = migrated_existing.get(cname, {})
         sessions_list = per_player.get(cname, [])
         lb = overall_mmr.get(cname) or next(
             (v for k, v in overall_mmr.items() if k.lower() == cname.lower()), None)
         existing_sessions = [h["session"] for h in existing.get("history", [])]
         new_history = existing.get("history", [])
+        current_mmr = base_mmr_by_name.get(cname, BASE_MMR)
+        baseline_import = bool(lb) and not existing_sessions
         for s in sessions_list:
             if s["session"] not in existing_sessions:
+                participant_names = session_participants.get(s["session"], [cname])
+                lobby_values = [base_mmr_by_name.get(name, BASE_MMR) for name in participant_names]
+                lobby_avg = sum(lobby_values) / len(lobby_values) if lobby_values else BASE_MMR
+                expected = expected_session_score(current_mmr, lobby_avg)
+                delta = 0.0 if baseline_import else calculate_mmr_delta(
+                    s["performance_score"],
+                    expected,
+                )
+                current_mmr = round(max(0, current_mmr + delta), 1)
+                s["mmr"] = current_mmr
+                s["expected_score"] = round(expected, 1)
+                s["lobby_avg_mmr"] = round(lobby_avg, 1)
+                s["mmr_delta"] = delta
                 new_history.append(s)
         merged_history = sorted(new_history, key=lambda x: session_sort_key(x.get("session", "")))
         if lb:
-            overall = lb["mmr"]
+            overall = current_mmr
             kd, kills, deaths = lb["kd"], lb.get("kills", 0), lb.get("deaths", 0)
             points, obj_time  = lb["points"], lb["obj_time"]
             assists, captures = lb["assists"], lb["captures"]
-            session_count     = lb["sessions"]
+            session_count     = max(lb["sessions"], len(merged_history))
         elif merged_history:
-            overall = round(sum(s["mmr"] for s in merged_history) / len(merged_history), 1)
+            overall = current_mmr
             last    = merged_history[-1]
             kd, kills = last["kd"], last.get("kills", 0)
             deaths    = last.get("deaths", 0)
@@ -426,6 +588,25 @@ def import_workbook_stats(guild_id: int, wb) -> list:
     save_json(MMR_FILE, mmr_data)
     imported.sort(key=lambda x: x[1], reverse=True)
     return imported
+
+
+def migrate_all_mmr_data():
+    changed = False
+    for gid, players in list(mmr_data.items()):
+        if not isinstance(players, dict):
+            continue
+        for name, data in list(players.items()):
+            if not isinstance(data, dict):
+                continue
+            migrated = migrate_player_data(data)
+            if migrated != data:
+                mmr_data[gid][name] = migrated
+                changed = True
+    if changed:
+        save_json(MMR_FILE, mmr_data)
+
+
+migrate_all_mmr_data()
 
 
 def get_guild_mmr(guild_id: int) -> dict:
@@ -2172,6 +2353,28 @@ async def rank(interaction: discord.Interaction):
         f"Obj Time: {match.get('obj_time','?')}s | Captures: {match.get('captures','?')}"
     )
     await send_minimal(interaction, msg, ephemeral=True, timeout=TIMEOUT_STAT)
+
+
+@bot.tree.command(name="explainmmr", description="Explain how Halo Night MMR is calculated.")
+async def explain_mmr(interaction: discord.Interaction):
+    lines = [
+        "## Halo Night MMR",
+        "MMR starts at **1000** and has **no hard maximum**. Existing 0-100 ratings migrate with `1000 + old MMR x 19`, so an old 100 becomes about **2900**.",
+        "",
+        "**Session performance** starts with the stat score:",
+        "`K/D 30% | Points 25% | Objective Time 25% | Assists 15% | Captures 5%`",
+        "",
+        "If the session sheet has placement columns from `1st` to `8th`, placements add a small bonus:",
+        "`1st 9 pts | 2nd 7 pts | 3rd 5 pts | 4th 3 pts | 5th-8th 1 pt`",
+        "`85% stat score + 15% placement score`",
+        "",
+        "Each new session compares your performance to what is expected from your MMR versus the lobby average.",
+        "The session change is capped between **-40** and **+40** MMR so ratings move steadily.",
+        "",
+        "Ranks use the new 1000+ scale. **Inheritor starts at 2910**, but you can keep climbing above it.",
+        f"Ranks are provisional until **{PROVISIONAL_SESSIONS}** sessions are recorded.",
+    ]
+    await send_minimal(interaction, "\n".join(lines), ephemeral=True, timeout=TIMEOUT_STAT)
 
 
 @bot.tree.command(name="compare", description="[Admin] Compare 2 to 4 players side by side.")

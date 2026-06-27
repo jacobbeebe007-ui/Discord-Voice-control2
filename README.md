@@ -7,7 +7,7 @@ A Discord bot built for Halo game nights. Manages voice channel teams, tracks pl
 ## Features
 
 - **Team management** — manually build teams, randomise, or balance by MMR using a snake draft
-- **MMR tracking** — import session stats from Excel, calculate overall MMR from cumulative leaderboard data
+- **MMR tracking** — import session stats from Excel, update uncapped player ratings with session performance and placement bonuses
 - **Halo Reach rank system** — 22 ranks from Recruit to Inheritor with custom server emojis
 - **Matchmaking roller** — roll Halo 3 maps, game types and teams with a veto system
 - **Stat commands** — leaderboard, player lookup, session breakdown, head-to-head rivals, compare, top stats
@@ -120,6 +120,7 @@ The bot uses custom server emojis for the 22 Halo Reach ranks. Upload the follow
 | `/stats` | Top performer in every stat category |
 | `/session [session] [player]` | A player's stats from a specific session e.g. `Session 1` |
 | `/matchmaking` | Roll Halo 3 maps, game types and teams — single or two match with veto |
+| `/explainmmr` | Explain how MMR, placements, session deltas and ranks work |
 | `/help` | List all commands available to you |
 
 ### Admin Only
@@ -140,7 +141,17 @@ The bot uses custom server emojis for the 22 Halo Reach ranks. Upload the follow
 
 ## MMR System
 
-MMR is calculated from the **cumulative Leaderboard sheet** in your Excel file using weighted stats:
+MMR is an uncapped persistent rating. New players start at **1000 MMR** and can keep climbing above the highest rank threshold.
+
+Existing old-scale MMR is migrated with:
+
+```
+new_mmr = 1000 + old_mmr * 19
+```
+
+That means an old `100` becomes about `2900`, leaving room to keep gaining MMR.
+
+Each new session calculates a performance score from weighted stats:
 
 | Stat | Weight |
 |---|---|
@@ -150,9 +161,52 @@ MMR is calculated from the **cumulative Leaderboard sheet** in your Excel file u
 | Assists | 15% |
 | Captures | 5% |
 
-Each stat is normalised 0–100 relative to all players in that import, then weighted and summed. The result is an overall MMR between 0 and 100.
+Each stat is normalised 0–100 relative to players in that session. If session placement columns from `1st` to `8th` exist, they add a small placement component:
+
+| Placing | Points |
+|---|---:|
+| 1st | 9 |
+| 2nd | 7 |
+| 3rd | 5 |
+| 4th | 3 |
+| 5th-8th | 1 |
+
+```
+performance_score = 85% stat_score + 15% placement_score
+```
+
+The bot compares the player's performance score to the expected score for their current MMR versus the lobby average. Each session can change MMR by up to **+40** or **-40**.
 
 Players with fewer than 3 sessions are marked as **provisional** with an asterisk `*` and their rank is not yet confirmed.
+
+The rank thresholds now use the 1000+ scale:
+
+| Rank | MMR |
+|---|---:|
+| Recruit | 1000+ |
+| Private | 1100+ |
+| Corporal | 1200+ |
+| Sergeant | 1290+ |
+| Warrant Officer | 1380+ |
+| Captain | 1470+ |
+| Major | 1560+ |
+| Lt. Colonel | 1650+ |
+| Commander | 1740+ |
+| Colonel | 1830+ |
+| Brigadier | 1920+ |
+| General | 2010+ |
+| Field Marshall | 2100+ |
+| Hero | 2190+ |
+| Legend | 2280+ |
+| Mythic | 2370+ |
+| Noble | 2460+ |
+| Eclipse | 2550+ |
+| Nova | 2640+ |
+| Forerunner | 2730+ |
+| Reclaimer | 2820+ |
+| Inheritor | 2910+ |
+
+Inheritor is the highest rank name, not a maximum MMR.
 
 ### Stats Source
 
@@ -163,7 +217,7 @@ The bot refreshes stats automatically every 10 minutes by default. It tries sour
 3. A Discord `.xlsx` upload when an admin runs `/import_mmr file:<attachment>`
 
 The bot expects the following sheets:
-- **`Leaderboard`** — cumulative stats across all sessions (used for overall MMR)
+- **`Leaderboard`** — cumulative stats across all sessions (used for player totals and old-score migration)
 - **`Session 1`, `Session 2`, ...** — individual session sheets (used for session history and ranks)
 
 Sheets named `Collective` or `Summary` are ignored.
