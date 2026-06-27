@@ -1508,32 +1508,6 @@ class TeamBuilderView(discord.ui.View):
             ephemeral=True,
         )
 
-    @discord.ui.button(label="🎲 Randomise", style=discord.ButtonStyle.primary, row=4)
-    async def randomise_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "### 🎲 Randomise teams\nPick **2–25** voice channels, then confirm.",
-            view=RandomiseView(self.guild), ephemeral=True)
-
-    @discord.ui.button(label="⚖️ Balanced", style=discord.ButtonStyle.primary, row=4)
-    async def balanced_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "### ⚖️ MMR-balanced teams\nPick channels to fill.",
-            view=MatchmakeView(self.guild), ephemeral=True)
-
-    @discord.ui.button(label="💾 Save", style=discord.ButtonStyle.secondary, row=4)
-    async def save_preset(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(SavePresetModal(self.guild))
-
-    @discord.ui.button(label="📂 Presets", style=discord.ButtonStyle.secondary, row=4)
-    async def load_preset(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not presets.get(str(self.guild.id)):
-            await interaction.response.send_message(
-                "⚠️ No presets saved yet.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            "### 📂 Load preset\nSelect a saved lineup:",
-            view=TeamPresetsView(self.guild), ephemeral=True)
-
 # ─────────────────────────────────────────────
 # HALO 3 MATCHMAKING
 # ─────────────────────────────────────────────

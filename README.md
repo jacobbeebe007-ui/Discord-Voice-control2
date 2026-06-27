@@ -126,7 +126,7 @@ The bot uses custom server emojis for the 22 Halo Reach ranks. Upload the follow
 
 | Command | Description |
 |---|---|
-| `/teammanager` | Team Manager — manual teams, random teams, MMR balance, presets/history, voice tools, recall, and match setup |
+| `/teammanager` | Team Manager — manual setup, auto teams, send teams, recall lobby, presets/history, and match setup |
 | `/sub [player_out] [player_in]` | Swap two players between active teams |
 | `/recall` | Move all voice members back to their mapped lobby channels |
 | `/set_lobby` | Map voice channels to lobby destinations for `/recall` |
