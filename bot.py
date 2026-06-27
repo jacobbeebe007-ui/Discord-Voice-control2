@@ -618,6 +618,87 @@ def save_team_to_history(guild_id: int, guild: discord.Guild, label: str = None)
     team_history[gid] = team_history[gid][:10]
     save_json(TEAM_HISTORY_FILE, team_history)
 
+
+def get_voice_members(guild: discord.Guild) -> list:
+    return list({m.id: m for vc in guild.voice_channels for m in vc.members}.values())
+
+
+def build_random_teams(guild: discord.Guild, selected: list) -> dict:
+    all_members = get_voice_members(guild)
+    random.shuffle(all_members)
+    buckets = {vc_id: [] for vc_id in selected}
+    for i, member in enumerate(all_members):
+        buckets[selected[i % len(selected)]].append(member)
+    return buckets
+
+
+def build_mmr_balanced_teams(guild: discord.Guild, selected: list) -> dict:
+    gmmr = get_guild_mmr(guild.id)
+    num_teams = len(selected)
+    rated, unrated = [], []
+    for member in get_voice_members(guild):
+        cname = canonical_name(member.display_name)
+        pdata = gmmr.get(cname) or gmmr.get(member.display_name)
+        if pdata:
+            rated.append((member, pdata["mmr"], pdata))
+        else:
+            unrated.append(member)
+
+    rated.sort(key=lambda x: x[1], reverse=True)
+    buckets = {vc_id: [] for vc_id in selected}
+    direction, idx = 1, 0
+    for member, mmr, pdata in rated:
+        buckets[selected[idx]].append((member, mmr, pdata))
+        idx += direction
+        if idx >= num_teams:
+            idx = num_teams - 1
+            direction = -1
+        elif idx < 0:
+            idx = 0
+            direction = 1
+
+    random.shuffle(unrated)
+    for i, member in enumerate(unrated):
+        buckets[selected[i % num_teams]].append((member, None, None))
+    return buckets
+
+
+async def try_move_member(member: discord.Member, vc: discord.VoiceChannel) -> str:
+    if not member.voice:
+        return "skipped"
+    try:
+        await member.move_to(vc)
+        return "moved"
+    except Exception:
+        return "failed"
+
+
+async def move_team_members(guild: discord.Guild, teams: dict) -> list:
+    results = []
+    for vc_id, member_ids in teams.items():
+        vc = guild.get_channel(int(vc_id))
+        if not vc:
+            continue
+        moved, skipped, failed = [], [], []
+        for mid in member_ids:
+            member = guild.get_member(mid)
+            if not member:
+                continue
+            move_result = await try_move_member(member, vc)
+            if move_result == "moved":
+                moved.append(member.display_name)
+            elif move_result == "skipped":
+                skipped.append(member.display_name)
+            else:
+                failed.append(member.display_name)
+        line = f"**{vc.name}**: {', '.join(moved) or 'nobody moved'}"
+        if skipped:
+            line += f" _(not in voice: {', '.join(skipped)})_"
+        if failed:
+            line += f" _(move failed: {', '.join(failed)})_"
+        results.append(line)
+    return results
+
 # ─────────────────────────────────────────────
 # RANDOMISE VIEW
 # ─────────────────────────────────────────────
@@ -636,16 +717,12 @@ class RandomiseView(discord.ui.View):
             await interaction.response.edit_message(
                 content="🎲 **Randomise** — Pick at least 2 channels first.", view=self)
             return
-        all_members = list({m.id: m for vc in self.guild.voice_channels
-                            for m in vc.members}.values())
+        all_members = get_voice_members(self.guild)
         if not all_members:
             await interaction.response.edit_message(
                 content="🎲 **Randomise** — No members in voice.", view=self)
             return
-        random.shuffle(all_members)
-        buckets = {vc_id: [] for vc_id in selected}
-        for i, m in enumerate(all_members):
-            buckets[selected[i % len(selected)]].append(m)
+        buckets = build_random_teams(self.guild, selected)
         gid = self.guild.id
         team_storage[gid] = {}
         await interaction.response.defer()
@@ -655,17 +732,21 @@ class RandomiseView(discord.ui.View):
             if not vc:
                 continue
             team_storage[gid][vc_id] = []
-            moved, skipped = [], []
+            moved, skipped, failed = [], [], []
             for m in members:
                 team_storage[gid][vc_id].append(m.id)
-                if m.voice:
-                    await m.move_to(vc)
+                move_result = await try_move_member(m, vc)
+                if move_result == "moved":
                     moved.append(m.display_name)
-                else:
+                elif move_result == "skipped":
                     skipped.append(m.display_name)
+                else:
+                    failed.append(m.display_name)
             line = f"**{vc.name}** ({len(moved)}): {', '.join(moved) or 'nobody'}"
             if skipped:
                 line += f" _(not in voice: {', '.join(skipped)})_"
+            if failed:
+                line += f" _(move failed: {', '.join(failed)})_"
             results.append(line)
         save_team_to_history(gid, self.guild, "🎲 Random")
         await interaction.followup.send(
@@ -712,35 +793,12 @@ class MatchmakeView(discord.ui.View):
             await interaction.response.edit_message(
                 content="⚖️ **Balanced** — Pick at least 2 channels first.", view=self)
             return
-        all_members = list({m.id: m for vc in self.guild.voice_channels
-                            for m in vc.members}.values())
+        all_members = get_voice_members(self.guild)
         if not all_members:
             await interaction.response.edit_message(
                 content="⚖️ **Balanced** — No members in voice.", view=self)
             return
-        gmmr = get_guild_mmr(self.guild.id)
-        num_teams = len(selected)
-        rated, unrated = [], []
-        for m in all_members:
-            cname = canonical_name(m.display_name)
-            pdata = gmmr.get(cname) or gmmr.get(m.display_name)
-            if pdata:
-                rated.append((m, pdata["mmr"], pdata))
-            else:
-                unrated.append(m)
-        rated.sort(key=lambda x: x[1], reverse=True)
-        buckets   = {vc_id: [] for vc_id in selected}
-        direction, idx = 1, 0
-        for member, mmr, pdata in rated:
-            buckets[selected[idx]].append((member, mmr, pdata))
-            idx += direction
-            if idx >= num_teams:
-                idx = num_teams - 1; direction = -1
-            elif idx < 0:
-                idx = 0; direction = 1
-        random.shuffle(unrated)
-        for i, m in enumerate(unrated):
-            buckets[selected[i % num_teams]].append((m, None, None))
+        buckets = build_mmr_balanced_teams(self.guild, selected)
         gid = self.guild.id
         team_storage[gid] = {}
         await interaction.response.defer()
@@ -750,7 +808,7 @@ class MatchmakeView(discord.ui.View):
             if not vc:
                 continue
             team_storage[gid][vc_id] = []
-            moved, skipped, mmr_vals = [], [], []
+            moved, skipped, failed, mmr_vals = [], [], [], []
             for m, mmr, pdata in members:
                 team_storage[gid][vc_id].append(m.id)
                 if mmr is not None:
@@ -759,15 +817,19 @@ class MatchmakeView(discord.ui.View):
                     mmr_vals.append(mmr)
                 else:
                     label = f"{m.display_name} ❔"
-                if m.voice:
-                    await m.move_to(vc)
+                move_result = await try_move_member(m, vc)
+                if move_result == "moved":
                     moved.append(label)
-                else:
+                elif move_result == "skipped":
                     skipped.append(label)
+                else:
+                    failed.append(label)
             avg  = f" | avg MMR: {round(sum(mmr_vals)/len(mmr_vals),1)}" if mmr_vals else ""
             line = f"**{vc.name}**{avg}: {', '.join(moved) or 'nobody'}"
             if skipped:
                 line += f" _(not in voice: {', '.join(skipped)})_"
+            if failed:
+                line += f" _(move failed: {', '.join(failed)})_"
             results.append(line)
         save_team_to_history(gid, self.guild, "⚖️ Balanced")
         await interaction.followup.send(
@@ -1179,6 +1241,170 @@ class TeamBuilderToolsView(discord.ui.View):
         await interaction.followup.send(msg, view=RecallPickerView(self.builder.guild), ephemeral=True)
 
 
+class TeamsDashboardView(discord.ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=None)
+        self.guild = guild
+
+    def content(self) -> str:
+        summary = build_team_summary(self.guild, self.guild.id)
+        return (
+            "## Team Control Panel\n"
+            "Choose a section below. Setup tools open privately for admins; final team and match results still post publicly.\n\n"
+            "**Manual Teams** - allocate specific players to voice channels.\n"
+            "**Auto Teams** - randomise or MMR-balance players in voice.\n"
+            "**Saved Teams** - save, load, or review previous team setups.\n"
+            "**Voice Tools** - send assigned teams, recall to lobby, or clear slots.\n"
+            "**Match Setup** - roll Halo 3 maps and game types.\n\n"
+            f"{summary}"
+        )
+
+    @discord.ui.button(label="Manual Teams", style=discord.ButtonStyle.primary, row=0)
+    async def manual_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = TeamBuilderView(self.guild)
+        await interaction.response.send_message(view._builder_content(), view=view, ephemeral=True)
+        view.message = await interaction.original_response()
+
+    @discord.ui.button(label="Auto Teams", style=discord.ButtonStyle.primary, row=0)
+    async def auto_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "## Auto Teams\nChoose random teams or MMR-balanced teams. Both use players currently in voice.",
+            view=AutoTeamsView(self.guild),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Saved Teams", style=discord.ButtonStyle.secondary, row=1)
+    async def saved_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "## Saved Teams\nSave the current assignments, load presets, or review recent team history.",
+            view=SavedTeamsView(self.guild),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Voice Tools", style=discord.ButtonStyle.success, row=1)
+    async def voice_tools(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "## Voice Tools\nSend assigned teams to voice, recall everyone to lobby, or clear current slots.",
+            view=VoiceToolsView(self.guild),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Match Setup", style=discord.ButtonStyle.secondary, row=2)
+    async def match_setup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "## Match Setup\nRoll Halo 3 maps and game types.",
+            view=MatchmakingMenuView(),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.secondary, row=2)
+    async def refresh_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content=self.content(), view=self)
+
+
+class AutoTeamsView(discord.ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=TIMEOUT_MENU)
+        self.guild = guild
+
+    @discord.ui.button(label="Random Teams", style=discord.ButtonStyle.primary, row=0)
+    async def random_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="## Random Teams\nPick 2-25 voice channels, then confirm.",
+            view=RandomiseView(self.guild),
+        )
+
+    @discord.ui.button(label="MMR Balanced Teams", style=discord.ButtonStyle.primary, row=0)
+    async def mmr_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="## MMR-Balanced Teams\nPick channels to fill from players currently in voice.",
+            view=MatchmakeView(self.guild),
+        )
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, row=1)
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Closed.", view=None)
+
+
+class SavedTeamsView(discord.ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=TIMEOUT_MENU)
+        self.guild = guild
+
+    @discord.ui.button(label="Save Current", style=discord.ButtonStyle.success, row=0)
+    async def save_current(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(SavePresetModal(self.guild))
+
+    @discord.ui.button(label="Load Preset", style=discord.ButtonStyle.primary, row=0)
+    async def load_preset(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not presets.get(str(self.guild.id)):
+            await interaction.response.send_message("No presets saved yet.", ephemeral=True)
+            return
+        await interaction.response.edit_message(
+            content="## Load Preset\nSelect a saved lineup:",
+            view=TeamPresetsView(self.guild),
+        )
+
+    @discord.ui.button(label="Team History", style=discord.ButtonStyle.secondary, row=1)
+    async def team_history(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not team_history.get(str(self.guild.id)):
+            await interaction.response.send_message("No team history yet.", ephemeral=True)
+            return
+        await interaction.response.edit_message(
+            content="## Team History\nSelect an entry to preview:",
+            view=TeamHistoryView(self.guild),
+        )
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, row=1)
+    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Closed.", view=None)
+
+
+class VoiceToolsView(discord.ui.View):
+    def __init__(self, guild: discord.Guild):
+        super().__init__(timeout=TIMEOUT_MENU)
+        self.guild = guild
+
+    @discord.ui.button(label="Send Teams", style=discord.ButtonStyle.success, row=0)
+    async def send_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gid = self.guild.id
+        teams = team_storage.get(gid, {})
+        if not teams:
+            await interaction.response.edit_message(content="No teams assigned yet.", view=self)
+            return
+        await interaction.response.defer()
+        results = await move_team_members(self.guild, teams)
+        save_team_to_history(gid, self.guild)
+        await interaction.followup.send(
+            "## Teams dispatched\n" + "\n".join(results),
+            view=DismissView(),
+            ephemeral=False,
+        )
+
+    @discord.ui.button(label="Show Teams", style=discord.ButtonStyle.secondary, row=0)
+    async def show_teams(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="## Current Teams\n" + build_team_summary(self.guild, self.guild.id),
+            view=self,
+        )
+
+    @discord.ui.button(label="Recall Lobby", style=discord.ButtonStyle.secondary, row=1)
+    async def recall_lobby(self, interaction: discord.Interaction, button: discord.ui.Button):
+        saved_id = recall_channels.get(str(self.guild.id))
+        saved = self.guild.get_channel(saved_id) if saved_id else None
+        msg = (
+            f"## Recall\nLobby is **{saved.name}**."
+            if saved
+            else "## Recall\nPick a lobby channel:"
+        )
+        await interaction.response.edit_message(content=msg, view=RecallPickerView(self.guild))
+
+    @discord.ui.button(label="Clear All Slots", style=discord.ButtonStyle.danger, row=1)
+    async def clear_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        team_storage.pop(self.guild.id, None)
+        await interaction.response.edit_message(content="Cleared every team slot.", view=None)
+
+
 class TeamBuilderView(discord.ui.View):
     def __init__(self, guild: discord.Guild):
         super().__init__(timeout=None)
@@ -1218,17 +1444,16 @@ class TeamBuilderView(discord.ui.View):
             vc = self.guild.get_channel(int(ch))
             ch_name = f"**{vc.name}**" if vc else str(ch)
         base = (
-            "## 👥 Team Builder\n"
+            "## 👥 Manual Team Builder\n"
             f"{self._staged_line()}\n"
             f"**Target channel:** {ch_name}\n"
             "—\n"
             "**Flow:** (1) voice channel · (2) add people · (3) **➕ Assign**\n"
             "· **📂 From lists** — multiselect 🎙️ voice / 🟢 online / ⚫ offline\n"
             "· **🔊 +All in voice** — stage everyone currently in a voice channel\n"
-            "**Auto:** 🎲 Random · ⚖️ MMR balance · **💾** Save · **📂** Presets\n"
             f"**Lobby:** {lobby}\n"
             "—\n"
-            "**⚙️ More** — clear all slots, history, recall"
+            "Use the main `/teams` dashboard for auto teams, saved teams, voice tools, and match setup."
         )
         if status:
             base += f"\n\n{status}"
@@ -1312,23 +1537,7 @@ class TeamBuilderView(discord.ui.View):
                 content=self._builder_content("⚠️ No teams assigned yet."), view=self)
             return
         await interaction.response.defer()
-        results = []
-        for vc_id, member_ids in teams.items():
-            vc = self.guild.get_channel(int(vc_id))
-            if not vc:
-                continue
-            moved, skipped = [], []
-            for mid in member_ids:
-                m = self.guild.get_member(mid)
-                if m and m.voice:
-                    await m.move_to(vc)
-                    moved.append(m.display_name)
-                elif m:
-                    skipped.append(m.display_name)
-            line = f"**{vc.name}**: {', '.join(moved) or 'nobody moved'}"
-            if skipped:
-                line += f" _(not in voice: {', '.join(skipped)})_"
-            results.append(line)
+        results = await move_team_members(self.guild, teams)
         save_team_to_history(gid, self.guild)
         await interaction.followup.send(
             "## 🚀 Teams dispatched\n" + "\n".join(results),
@@ -1580,6 +1789,18 @@ class VetoView(discord.ui.View):
             content="🔒 **Matches locked in! Good luck!**",
             embeds=self._build_embeds(), view=self)
 
+
+if not HAS_HALO_BOT:
+    @bot.tree.command(name="matchmaking",
+        description="[Admin] Roll Halo 3 maps, game types and match settings.")
+    @is_admin()
+    async def matchmaking(interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "## Matchmaking\nChoose team count, map pool, and roll one or two matches.",
+            view=MatchmakingMenuView(),
+            ephemeral=True,
+        )
+
 # ─────────────────────────────────────────────
 # ORBITAL JUMP APPROVAL BOARD
 # ─────────────────────────────────────────────
@@ -1813,10 +2034,9 @@ async def teams(interaction: discord.Interaction):
         await interaction.response.send_message(
             "⚠️ No voice channels found.", ephemeral=True)
         return
-    view = TeamBuilderView(interaction.guild)
+    view = TeamsDashboardView(interaction.guild)
     await interaction.response.send_message(
-        view._builder_content(), view=view, ephemeral=False)
-    view.message = await interaction.original_response()
+        view.content(), view=view, ephemeral=False)
 
 
 @bot.tree.command(name="sub",
